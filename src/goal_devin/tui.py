@@ -265,12 +265,13 @@ class NewGoalScreen(Screen):
 
     BINDINGS = [
         Binding("escape", "cancel", "cancel"),
+        Binding("ctrl+s", "start", "start"),
     ]
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
         yield VerticalScroll(
-            Static("New Goal", classes="title-bar"),
+            Static("New Goal (ctrl+s to start, Esc to cancel)", classes="title-bar"),
             Static("  Goal prompt:", classes="form-label"),
             TextArea(id="goal-prompt", classes="form-field"),
             Static("  Model:", classes="form-label"),
@@ -303,6 +304,9 @@ class NewGoalScreen(Screen):
 
     def action_cancel(self) -> None:
         self.app.pop_screen()
+
+    def action_start(self) -> None:
+        self._start_goal()
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "cancel-btn":
@@ -698,7 +702,8 @@ class GoalDevinApp(App):
                 break
 
     def _on_status(self, status, detail):
-        pass
+        if status == core.STATUS_ERROR:
+            self.notify(f"error: {detail}", severity="error", timeout=10)
 
     def _on_done(self, reason, iters, elapsed):
         elapsed_str = fmt_elapsed(elapsed)
