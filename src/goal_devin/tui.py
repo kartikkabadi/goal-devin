@@ -656,6 +656,7 @@ class GoalDevinApp(App):
         loop.start()
         track_key = worktree_id or id(loop)
         self.loops[track_key] = loop
+        self.notify(f"started goal: {goal[:40]}", timeout=5)
 
     def resume_goal(self, state: dict) -> None:
         """Resume a stopped/killed goal from saved state."""
