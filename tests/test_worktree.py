@@ -146,6 +146,14 @@ class TestMergeWorktree(unittest.TestCase):
             ok, err = merge_worktree("goal-abc123", cwd=str(wt_path))
             self.assertTrue(ok, f"merge from worktree cwd failed: {err}")
 
+    def test_merge_rejects_flag_branch(self):
+        """target_branch starting with '-' must be rejected — prevents git flag injection."""
+        with tempfile.TemporaryDirectory() as tmp:
+            _init_repo(tmp)
+            ok, err = merge_worktree("goal-abc123", target_branch="-evil", cwd=tmp)
+            self.assertFalse(ok)
+            self.assertIn("invalid", err)
+
 
 if __name__ == "__main__":
     unittest.main()

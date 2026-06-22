@@ -10,6 +10,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 - Paused goals orphaned worktrees on quit: `on_shutdown` only cleaned worktrees for RUNNING/STARTING goals, missing PAUSED. A paused goal's loop is alive (thread blocked on pause_event) — `on_shutdown` kills it, but the worktree cleanup check skipped PAUSED status, leaving the worktree on disk. Added STATUS_PAUSED to the cleanup check.
 - Resume failed on killed worktree goals: when a worktree goal was killed, `_on_done` removed the worktree from disk, but the state file still pointed to the deleted worktree path as `cwd`. Resuming from CLI or TUI would try to `Popen(cwd=deleted_path)` → `FileNotFoundError`. Both `cmd_resume` (CLI) and `resume_goal` (TUI) now check if `cwd` exists on disk. If not, they fall back to `os.getcwd()`, set `use_worktree=False`, `worktree_id=None`, and warn the user.
+- Iters reset to 0 on resume when cwd doesn't match state file: `GoalLoop._run` loaded state via `load_state(self.cwd)`, but when a worktree was deleted and cwd fell back to `os.getcwd()`, the state file for the new cwd had a different session_id. The iters count reset to 0, causing `max_iters` goals to run more iterations than expected. Fixed: `GoalLoop._run` now falls back to `find_state_by_session_id` when `load_state` returns a mismatched session, preserving the correct iters count.
+
+### Security
+- Path traversal in `log_path`: user-supplied session IDs containing `/`, `\`, or `..` could traverse outside the log directory. Added validation that rejects session IDs with path separators or traversal sequences.
+- Flag injection in `merge_worktree`: `target_branch` starting with `-` could be interpreted as a git flag. Added validation that rejects branch names starting with `-`.
 
 
 ## [0.4.0] - 2026-06-22

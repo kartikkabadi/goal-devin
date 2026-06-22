@@ -324,7 +324,7 @@ Each iteration's output is logged to `~/.goal-devin/logs/<session-id>.log`. Stat
 git clone https://github.com/kartikkabadi/goal-devin
 cd goal-devin
 uv sync
-uv run pytest              # run tests (74 tests)
+uv run pytest              # run tests (78 tests)
 uv run goal-devin          # run TUI locally
 ```
 

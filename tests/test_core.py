@@ -2,6 +2,7 @@
 import json
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch, MagicMock
@@ -11,7 +12,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 from goal_devin import core
 from goal_devin.core import (
     fmt_elapsed, state_file_for, load_state, save_state, all_states,
-    read_log_tail, GoalLoop, MODELS, latest_session_id,
+    read_log_tail, log_path, GoalLoop, MODELS, latest_session_id,
     STATUS_RUNNING, STATUS_PAUSED, STATUS_KILLED,
 )
 
@@ -92,6 +93,20 @@ class TestReadLogTail(unittest.TestCase):
         from goal_devin.core import append_log
         append_log("test-sid", "line1\nline2\nline3\n")
         self.assertEqual(read_log_tail("test-sid", lines=2), "line2\nline3")
+
+    def test_log_path_rejects_traversal(self):
+        """log_path must reject session_ids containing path traversal chars."""
+        with self.assertRaises(ValueError):
+            log_path("../../etc/passwd")
+        with self.assertRaises(ValueError):
+            log_path("foo/bar")
+        with self.assertRaises(ValueError):
+            log_path("foo\\bar")
+
+    def test_log_path_accepts_valid_session_id(self):
+        """Normal session IDs (alphanumeric + hyphens) are accepted."""
+        p = log_path("devin-sid-abc123")
+        self.assertTrue(str(p).endswith("devin-sid-abc123.log"))
 
 
 class TestModels(unittest.TestCase):
@@ -229,6 +244,28 @@ class TestGoalLoop(unittest.TestCase):
         loop._run_devin(["-p", "test"])
         _, kwargs = mock_popen.call_args
         self.assertIn("cwd", kwargs)
+
+    def test_resume_preserves_iters_when_cwd_mismatch(self):
+        """Resume must find iters via find_state_by_session_id when cwd doesn't match.
+
+        Simulates: worktree was deleted, cwd fell back to os.getcwd(),
+        load_state(new_cwd) returns a different state file — the loop must
+        still find the original iters count via session_id search.
+        """
+        # save state with original worktree cwd
+        save_state({"session_id": "sid-123", "cwd": "/original/wt", "goal": "test",
+                    "iters": 5, "model": "glm-5.2", "status": "stopped"},
+                   cwd="/original/wt")
+        # create loop with different cwd (worktree-deleted fallback)
+        loop = GoalLoop(goal="test", session_id="sid-123", cwd="/different/path")
+        statuses = []
+        loop.on_status = lambda s, d: statuses.append((s, d))
+        loop.start_time = time.monotonic()
+        loop.kill()  # set kill_event so loop exits after resume branch
+        loop._run()  # run directly (not in thread)
+        self.assertEqual(loop.iters, 5)
+        self.assertTrue(any("iter 5" in d for s, d in statuses),
+                        f"expected 'resumed at iter 5' in statuses: {statuses}")
 
 
 class TestNotifySplit(unittest.TestCase):

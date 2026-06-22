@@ -129,6 +129,8 @@ def merge_worktree(session_id, target_branch=None, cwd=None):
         return False, "could not resolve main repo root"
     branch = branch_name(session_id)
     if target_branch:
+        if target_branch.startswith("-"):
+            return False, "invalid branch name"
         # checkout target first
         r = subprocess.run(
             ["git", "checkout", target_branch],

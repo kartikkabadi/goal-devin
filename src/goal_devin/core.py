@@ -133,6 +133,8 @@ def all_states():
 
 
 def log_path(session_id):
+    if "/" in session_id or "\\" in session_id or ".." in session_id:
+        raise ValueError(f"invalid session id: {session_id}")
     return LOG_DIR / f"{session_id}.log"
 
 
@@ -348,7 +350,11 @@ class GoalLoop:
                     self.on_iter(0, self.session_id, r.stdout, 0)
             else:
                 state = load_state(self.cwd) or {}
-                self.iters = state.get("iters", 0) if state.get("session_id") == self.session_id else 0
+                if state.get("session_id") != self.session_id:
+                    # cwd may not match (e.g., worktree was deleted, fell back
+                    # to os.getcwd()) — search all states for this session_id
+                    state = find_state_by_session_id(self.session_id) or {}
+                self.iters = state.get("iters", 0)
                 if not self.goal:
                     self.goal = state.get("goal", "")
                 if not self.goal:
