@@ -209,7 +209,10 @@ def latest_session_id(cwd, retries=3, delay=1.0):
             time.sleep(delay)
             continue
         for s in sessions:
-            if Path(s.get("working_directory", "")).resolve() == Path(cwd_resolved):
+            wd = s.get("working_directory", "")
+            if not wd:
+                continue
+            if Path(wd).resolve() == Path(cwd_resolved):
                 return s.get("id")
         time.sleep(delay)
     return None
@@ -441,13 +444,19 @@ class GoalLoop:
 
 
 # --- notifications ---
+def _escape_applescript(s):
+    """Escape a string for safe interpolation into AppleScript double-quoted strings."""
+    return s.replace("\\", "\\\\").replace('"', '\\"')
+
+
 def notify_desktop(title, message):
     """Send a desktop notification. macOS: osascript, Linux: notify-send. No-op if unavailable."""
     plat = platform.system().lower()
     if plat == "darwin" and shutil.which("osascript"):
         try:
             subprocess.run(["osascript", "-e",
-                            f'display notification "{message}" with title "{title}"'],
+                            f'display notification "{_escape_applescript(message)}" '
+                            f'with title "{_escape_applescript(title)}"'],
                            capture_output=True, timeout=5)
         except Exception:
             pass

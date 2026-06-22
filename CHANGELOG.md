@@ -5,6 +5,21 @@ All notable changes to goal-devin will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] - 2026-06-22
+
+### Fixed
+- Session contamination: `latest_session_id` no longer falls back to `sessions[0]` when no session matches cwd. The fallback could resume another goal's session when multiple goals ran in different directories. Now returns None and the goal dies with a clear error. Also skips sessions with missing/empty `working_directory` (was false-matching the process cwd via `Path("").resolve()`).
+- Worktree orphan cleanup: killed goals now have their worktree removed from disk. Previously worktrees accumulated in `.goal-wt/` forever. Both TUI `_on_done` and CLI `_run_goal_loop` call `remove_worktree(force=True)` on kill. max_iters and error goals keep their worktree (merge/debug).
+- Worktree cleanup from worktree cwd: `remove_worktree` and `merge_worktree` used `repo_root(cwd)` which returns the worktree's own top-level when called from inside a worktree, not the main repo root. This made `git worktree remove` fail because it couldn't find the worktree path. Added `main_repo_root` using `git rev-parse --git-common-dir` which resolves the actual main repo root from any cwd inside a repo (including linked worktrees).
+- TUI shutdown cleanup: `on_shutdown` now joins killed loops and removes worktrees for goals still running/starting. Previously `on_done` callbacks used `call_from_thread` which may not fire after the event loop stops, leaving orphaned worktrees on quit.
+- AppleScript injection: `notify_desktop` interpolated unescaped strings into osascript. Added `_escape_applescript` to escape backslash and double-quote. Not exploitable today (no user input reaches notifications) but defensive.
+
+### Added
+- `main_repo_root` function in worktree.py — resolves the main repo root from any cwd inside a repo, including linked worktrees. Uses `git rev-parse --git-common-dir`.
+- `_escape_applescript` function in core.py — escapes strings for safe AppleScript interpolation.
+- 10 new tests: session resolution edge cases (missing workdir, empty list, multiple matches), worktree cleanup (kill removes, max_iters keeps, error keeps, no-worktree no-remove, shutdown cleanup, remove from worktree cwd, merge from worktree cwd), AppleScript escape (plain, quote, backslash, injection attempt).
+
+
 ## [0.3.0] - 2026-06-22
 
 ### Added

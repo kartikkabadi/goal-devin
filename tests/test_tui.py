@@ -232,3 +232,40 @@ async def test_kill_without_worktree_does_not_call_remove(app):
 
             mock_remove.assert_not_called()
         assert app.goals["sid1"].status == STATUS_KILLED
+
+
+async def test_shutdown_cleans_up_running_worktrees(app):
+    """on_shutdown removes worktrees for goals still running/starting."""
+    async with app.run_test() as pilot:
+        gs_running = GoalState(goal="g1", model="glm-5.2", session_id="sid1",
+                               status=STATUS_RUNNING, iters=3,
+                               use_worktree=True, worktree_id="goal-r1",
+                               cwd="/fake/repo")
+        gs_starting = GoalState(goal="g2", model="glm-5.2", session_id="tmp-abc",
+                                status=STATUS_STARTING,
+                                use_worktree=True, worktree_id="goal-s2",
+                                cwd="/fake/repo2")
+        gs_stopped = GoalState(goal="g3", model="glm-5.2", session_id="sid3",
+                               status=STATUS_STOPPED, iters=10,
+                               use_worktree=True, worktree_id="goal-s3",
+                               cwd="/fake/repo3")
+        app.goals["sid1"] = gs_running
+        app.goals["tmp-abc"] = gs_starting
+        app.goals["sid3"] = gs_stopped
+
+        mock_loop = MagicMock()
+        mock_loop.is_alive.return_value = True
+        app.loops["sid1"] = mock_loop
+
+        with patch("goal_devin.tui.remove_worktree") as mock_remove:
+            mock_remove.return_value = (True, None)
+            app.on_shutdown()
+            await pilot.pause()
+
+            # running + starting goals get worktree removed
+            calls = mock_remove.call_args_list
+            removed_ids = {c.kwargs["cwd"] for c in calls}
+            assert any(c.args[0] == "goal-r1" for c in calls), "running goal worktree not removed"
+            assert any(c.args[0] == "goal-s2" for c in calls), "starting goal worktree not removed"
+            # stopped goal worktree NOT removed
+            assert not any(c.args[0] == "goal-s3" for c in calls), "stopped goal worktree should not be removed"

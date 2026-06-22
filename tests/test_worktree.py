@@ -9,7 +9,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from goal_devin import worktree as wt
 from goal_devin.worktree import (
-    is_git_repo, repo_root, branch_name, worktree_path,
+    is_git_repo, repo_root, main_repo_root, branch_name, worktree_path,
     create_worktree, remove_worktree, list_worktrees, merge_worktree,
 )
 
@@ -44,6 +44,28 @@ class TestWorktreeHelpers(unittest.TestCase):
             self.assertIsNotNone(root)
             self.assertEqual(Path(root), Path(tmp).resolve())
 
+    def test_main_repo_root_from_main(self):
+        """main_repo_root returns the main repo root when called from main repo."""
+        with tempfile.TemporaryDirectory() as tmp:
+            _init_repo(tmp)
+            root = main_repo_root(tmp)
+            self.assertIsNotNone(root)
+            self.assertEqual(Path(root), Path(tmp).resolve())
+
+    def test_main_repo_root_from_worktree(self):
+        """main_repo_root returns the MAIN repo root when called from a worktree,
+        not the worktree's own top-level. This is the key difference from repo_root."""
+        with tempfile.TemporaryDirectory() as tmp:
+            _init_repo(tmp)
+            wt_path, err = create_worktree("test-sid", cwd=tmp)
+            self.assertIsNone(err)
+            # repo_root from worktree returns the worktree path
+            rr = repo_root(str(wt_path))
+            self.assertEqual(Path(rr), Path(wt_path).resolve())
+            # main_repo_root from worktree returns the MAIN repo root
+            mrr = main_repo_root(str(wt_path))
+            self.assertEqual(Path(mrr), Path(tmp).resolve())
+
     def test_worktree_path(self):
         with tempfile.TemporaryDirectory() as tmp:
             _init_repo(tmp)
@@ -75,6 +97,18 @@ class TestCreateRemoveWorktree(unittest.TestCase):
             self.assertIsNone(p)
             self.assertIn("not a git repo", err)
 
+    def test_remove_from_worktree_cwd(self):
+        """remove_worktree must work when cwd is the worktree path itself,
+        not just the main repo root. This is what _on_done passes."""
+        with tempfile.TemporaryDirectory() as tmp:
+            _init_repo(tmp)
+            wt_path, err = create_worktree("test-sid", cwd=tmp)
+            self.assertIsNone(err)
+            # remove using the worktree path as cwd (not the main repo root)
+            ok, err = remove_worktree("test-sid", cwd=str(wt_path), force=True)
+            self.assertTrue(ok, f"remove from worktree cwd failed: {err}")
+            self.assertFalse(wt_path.exists())
+
 
 class TestListWorktrees(unittest.TestCase):
     def test_list_empty(self):
@@ -105,6 +139,21 @@ class TestMergeWorktree(unittest.TestCase):
             subprocess.run(["git", "commit", "-m", "test change"], cwd=wt_dir, capture_output=True)
             ok, err = merge_worktree("goal-abc123", cwd=tmp)
             self.assertTrue(ok, f"merge failed: {err}")
+
+    def test_merge_from_worktree_cwd(self):
+        """merge_worktree must work when cwd is the worktree path itself,
+        not just the main repo root. This is what GoalDetailScreen passes."""
+        with tempfile.TemporaryDirectory() as tmp:
+            _init_repo(tmp)
+            wt_path, err = create_worktree("goal-abc123", cwd=tmp)
+            self.assertIsNone(err)
+            wt_dir = Path(tmp) / ".goal-wt" / "goal-abc123"
+            (wt_dir / "newfile").write_text("content")
+            subprocess.run(["git", "add", "-A"], cwd=wt_dir, capture_output=True)
+            subprocess.run(["git", "commit", "-m", "test change"], cwd=wt_dir, capture_output=True)
+            # merge using the worktree path as cwd (not the main repo root)
+            ok, err = merge_worktree("goal-abc123", cwd=str(wt_path))
+            self.assertTrue(ok, f"merge from worktree cwd failed: {err}")
 
 
 if __name__ == "__main__":

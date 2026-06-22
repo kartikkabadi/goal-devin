@@ -163,6 +163,15 @@ class TestLatestSessionId(unittest.TestCase):
         ]))
         self.assertEqual(latest_session_id("/foo/bar", retries=1), "sid-first")
 
+    @patch("goal_devin.core.run_devin")
+    def test_missing_workdir_skipped(self, mock_run):
+        """Session with missing/empty working_directory is skipped, not matched."""
+        mock_run.return_value = self._cp(json.dumps([
+            {"id": "sid-no-cwd"},
+            {"id": "sid-empty-cwd", "working_directory": ""},
+        ]))
+        self.assertIsNone(latest_session_id("/foo/bar", retries=1))
+
 
 class TestGoalLoop(unittest.TestCase):
     def setUp(self):
@@ -256,6 +265,30 @@ class TestNotifySplit(unittest.TestCase):
         core.notify("title", "msg", bell=False)
         mock_desktop.assert_called_once_with("title", "msg")
         mock_bell.assert_not_called()
+
+
+class TestEscapeApplescript(unittest.TestCase):
+    """_escape_applescript must escape backslash and double-quote — prevents injection."""
+
+    def test_plain_string_unchanged(self):
+        self.assertEqual(core._escape_applescript("hello world"), "hello world")
+
+    def test_escapes_double_quote(self):
+        self.assertEqual(core._escape_applescript('say "hi"'), 'say \\"hi\\"')
+
+    def test_escapes_backslash(self):
+        self.assertEqual(core._escape_applescript("path\\to"), "path\\\\to")
+
+    def test_injection_attempt_neutralized(self):
+        """AppleScript injection via closing quote must not break out of the string."""
+        injected = '"; do shell script "rm -rf /"'
+        escaped = core._escape_applescript(injected)
+        # every double-quote in the escaped string must be preceded by a backslash
+        # so AppleScript treats it as a literal char, not as closing the string
+        for i, ch in enumerate(escaped):
+            if ch == '"':
+                self.assertTrue(i > 0 and escaped[i-1] == '\\',
+                                f'unescaped quote at position {i}: {escaped!r}')
 
 
 class TestVersionDedup(unittest.TestCase):

@@ -23,7 +23,11 @@ def is_git_repo(cwd=None):
 
 
 def repo_root(cwd=None):
-    """Return repo root path, or None if not in a repo."""
+    """Return repo root path, or None if not in a repo.
+
+    Returns the worktree's own top-level when called from inside a worktree,
+    NOT the main repo root. Use main_repo_root for that.
+    """
     try:
         r = subprocess.run(
             ["git", "rev-parse", "--show-toplevel"],
@@ -31,6 +35,32 @@ def repo_root(cwd=None):
         )
         if r.returncode == 0:
             return Path(r.stdout.strip())
+    except FileNotFoundError:
+        pass
+    return None
+
+
+def main_repo_root(cwd=None):
+    """Return the main repo root (the one with .git/ dir, not a worktree).
+
+    Works from any cwd inside a repo, including linked worktrees.
+    Returns None if not in a repo or git unavailable.
+    """
+    try:
+        r = subprocess.run(
+            ["git", "rev-parse", "--git-common-dir"],
+            capture_output=True, text=True, cwd=cwd or ".",
+        )
+        if r.returncode == 0:
+            common_dir = Path(r.stdout.strip())
+            # git may return a relative path — resolve against cwd
+            if not common_dir.is_absolute():
+                base = Path(cwd) if cwd else Path.cwd()
+                common_dir = (base / common_dir).resolve()
+            else:
+                common_dir = common_dir.resolve()
+            # common dir is <main_repo>/.git — parent is the main repo root
+            return common_dir.parent
     except FileNotFoundError:
         pass
     return None
@@ -67,11 +97,17 @@ def create_worktree(session_id, cwd=None):
 
 
 def remove_worktree(session_id, cwd=None, force=False):
-    """Remove a worktree. Returns (True, None) or (False, error)."""
+    """Remove a worktree. Returns (True, None) or (False, error).
+
+    cwd can be the main repo root OR a worktree path — main_repo_root
+    resolves the actual repo root from either.
+    """
     if not is_git_repo(cwd):
         return False, "not a git repo"
-    root = repo_root(cwd)
-    wt = worktree_path(session_id, cwd)
+    root = main_repo_root(cwd)
+    if not root:
+        return False, "could not resolve main repo root"
+    wt = root / WORKTREE_DIR / session_id
     branch = branch_name(session_id)
     args = ["git", "worktree", "remove"]
     if force:
@@ -89,10 +125,16 @@ def remove_worktree(session_id, cwd=None, force=False):
 
 
 def merge_worktree(session_id, target_branch=None, cwd=None):
-    """Merge a worktree's branch into target (default: current branch)."""
+    """Merge a worktree's branch into target (default: current branch).
+
+    cwd can be the main repo root OR a worktree path — main_repo_root
+    resolves the actual repo root from either.
+    """
     if not is_git_repo(cwd):
         return False, "not a git repo"
-    root = repo_root(cwd)
+    root = main_repo_root(cwd)
+    if not root:
+        return False, "could not resolve main repo root"
     branch = branch_name(session_id)
     if target_branch:
         # checkout target first

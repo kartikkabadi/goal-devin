@@ -649,10 +649,20 @@ class GoalDevinApp(App):
         self.push_screen(MainScreen())
 
     def on_shutdown(self) -> None:
-        """Kill all running loops on quit."""
+        """Kill all running loops on quit and clean up worktrees.
+
+        on_done callbacks use call_from_thread which may not fire after the
+        event loop stops, so we remove worktrees synchronously here.
+        """
         for loop in self.loops.values():
             if loop.is_alive():
                 loop.kill()
+                loop.join(timeout=2)
+        # remove worktrees for any goal that was still running/starting
+        for gs in self.goals.values():
+            if gs.status in (core.STATUS_RUNNING, core.STATUS_STARTING):
+                if gs.use_worktree and gs.worktree_id:
+                    remove_worktree(gs.worktree_id, cwd=gs.cwd, force=True)
 
     def get_loop(self, session_id: str) -> GoalLoop | None:
         return self.loops.get(session_id)
