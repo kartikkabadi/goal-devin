@@ -97,7 +97,7 @@ def _run_goal_loop(goal, session_id=None, model=None, permission_mode=None,
     sid_display = session_id or _c("(new session)", C.DIM)
     print(f"  {_c('model', C.BOLD)}  {_c(loop.model, C.CYAN)}  {sid_display}")
     if use_sandbox:
-        print(f"  {_c('sandbox', C.BOLD)} on (autonomous mode)")
+        print(f"  {_c('sandbox', C.BOLD)} on (OS isolation)")
     if use_worktree:
         print(f"  {_c('worktree', C.BOLD)} {cwd}")
     print()
@@ -139,7 +139,7 @@ def cmd_goal(args):
             use_worktree = False
             worktree_id = None
 
-    permission_mode = "autonomous" if use_sandbox else args.permission_mode
+    permission_mode = args.permission_mode
     return _run_goal_loop(
         goal=args.prompt,
         model=args.model,
@@ -174,7 +174,7 @@ def cmd_resume(args):
     worktree_id = state.get("worktree_id")
     use_worktree = state.get("use_worktree", False)
     use_sandbox = state.get("use_sandbox", False)
-    permission_mode = "autonomous" if use_sandbox else (args.permission_mode or state.get("permission_mode"))
+    permission_mode = args.permission_mode or state.get("permission_mode")
     return _run_goal_loop(
         goal=goal,
         session_id=session_id,
@@ -290,7 +290,7 @@ state: ~/.goal-devin/
     common.add_argument("--no-worktree", action="store_false", dest="worktree",
                         help="don't create git worktree")
     common.add_argument("--sandbox", action="store_true", default=DEFAULTS["use_sandbox"],
-                        help="use devin --sandbox (OS isolation, forces autonomous mode)")
+                        help="use devin --sandbox (OS isolation, OS-level exec isolation)")
     common.add_argument("--no-sandbox", action="store_false", dest="sandbox",
                         help="don't use devin sandbox")
 

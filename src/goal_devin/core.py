@@ -222,11 +222,9 @@ class GoalLoop:
         self.goal = goal
         self.session_id = session_id
         self.model = model or DEFAULTS["model"]
-        # sandbox forces autonomous mode
-        if use_sandbox:
-            permission_mode = "autonomous"
-        else:
-            permission_mode = permission_mode or DEFAULTS["permission_mode"]
+        # sandbox is just a flag — it enforces OS-level isolation on exec tool
+        # it works with any permission mode, no need to override
+        permission_mode = permission_mode or DEFAULTS["permission_mode"]
         self.permission_mode = permission_mode
         self.sleep_secs = sleep_secs if sleep_secs is not None else DEFAULTS["sleep_secs"]
         self.max_iters = max_iters if max_iters is not None else DEFAULTS["max_iters"]

@@ -150,9 +150,15 @@ class TestGoalLoop(unittest.TestCase):
         loop.kill()
         self.assertTrue(loop.kill_event.is_set())
 
-    def test_sandbox_forces_autonomous(self):
+    def test_sandbox_keeps_permission_mode(self):
+        """sandbox is just a flag — it doesn't override permission mode."""
         loop = GoalLoop(goal="test", use_sandbox=True, cwd="/fake")
-        self.assertEqual(loop.permission_mode, "autonomous")
+        self.assertEqual(loop.permission_mode, "dangerous")  # default
+
+    def test_sandbox_with_explicit_permission(self):
+        loop = GoalLoop(goal="test", use_sandbox=True,
+                        permission_mode="normal", cwd="/fake")
+        self.assertEqual(loop.permission_mode, "normal")
 
     def test_no_sandbox_keeps_permission(self):
         loop = GoalLoop(goal="test", use_sandbox=False,
