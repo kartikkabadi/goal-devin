@@ -33,7 +33,7 @@ from .core import (
     GoalLoop, GoalState, all_states, fmt_elapsed,
     read_log_tail, log_path, MODELS, DEFAULTS, notify_desktop,
 )
-from .worktree import is_git_repo, create_worktree, merge_worktree, list_worktrees
+from .worktree import is_git_repo, create_worktree, merge_worktree, list_worktrees, remove_worktree
 
 
 CSS = """
@@ -815,6 +815,12 @@ class GoalDevinApp(App):
             gs.elapsed = elapsed
             if reason == "killed":
                 gs.status = core.STATUS_KILLED
+                # ponytail: remove worktree on kill — user discarded the work.
+                # max_iters/error keep worktree so user can merge/debug.
+                if gs.use_worktree and gs.worktree_id:
+                    ok, err = remove_worktree(gs.worktree_id, cwd=gs.cwd, force=True)
+                    if not ok:
+                        self.notify(f"worktree cleanup failed: {err}", severity="warning", timeout=10)
             elif reason == "error":
                 gs.status = core.STATUS_ERROR
             else:

@@ -25,7 +25,7 @@ from .core import (
     GoalLoop, load_state, all_states, find_state_by_session_id, log_path,
     fmt_elapsed, DEFAULTS, notify,
 )
-from .worktree import is_git_repo, create_worktree
+from .worktree import is_git_repo, create_worktree, remove_worktree
 
 
 # --- ANSI colors (stdlib) ---
@@ -68,6 +68,12 @@ def _run_goal_loop(goal, session_id=None, model=None, permission_mode=None,
         result["reason"] = reason
         result["iters"] = iters
         result["elapsed"] = elapsed
+        # ponytail: remove worktree on kill — user discarded the work.
+        # max_iters/error keep worktree so user can merge/debug.
+        if reason == "killed" and use_worktree and worktree_id:
+            ok, err = remove_worktree(worktree_id, cwd=cwd, force=True)
+            if not ok:
+                print(f"  {_c('warn', C.YELLOW)} worktree cleanup failed: {err}", file=sys.stderr)
         done_event.set()
 
     def on_status(status, detail):

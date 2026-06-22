@@ -11,7 +11,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 from goal_devin import core
 from goal_devin.core import (
     fmt_elapsed, state_file_for, load_state, save_state, all_states,
-    read_log_tail, GoalLoop, MODELS, parse_devin_models,
+    read_log_tail, GoalLoop, MODELS, parse_devin_models, latest_session_id,
     STATUS_RUNNING, STATUS_PAUSED, STATUS_KILLED,
 )
 
@@ -121,6 +121,47 @@ class TestParseDevinModels(unittest.TestCase):
     @patch("goal_devin.core.run_devin", side_effect=FileNotFoundError())
     def test_parse_no_devin(self, _):
         self.assertIsNone(parse_devin_models())
+
+
+class TestLatestSessionId(unittest.TestCase):
+    """latest_session_id must match cwd exactly — no fallback to sessions[0]."""
+
+    def _cp(self, stdout):
+        cp = MagicMock()
+        cp.returncode = 0
+        cp.stdout = stdout
+        return cp
+
+    @patch("goal_devin.core.run_devin")
+    def test_cwd_match_returns_session(self, mock_run):
+        """Session with matching cwd is returned."""
+        mock_run.return_value = self._cp(
+            json.dumps([{"id": "sid-correct", "working_directory": "/foo/bar"}])
+        )
+        self.assertEqual(latest_session_id("/foo/bar", retries=1), "sid-correct")
+
+    @patch("goal_devin.core.run_devin")
+    def test_no_cwd_match_returns_none(self, mock_run):
+        """No cwd match -> None, NOT sessions[0]. Prevents cross-goal clobber."""
+        mock_run.return_value = self._cp(
+            json.dumps([{"id": "sid-other", "working_directory": "/other/dir"}])
+        )
+        self.assertIsNone(latest_session_id("/foo/bar", retries=1))
+
+    @patch("goal_devin.core.run_devin")
+    def test_empty_session_list_returns_none(self, mock_run):
+        """Empty session list -> None."""
+        mock_run.return_value = self._cp(json.dumps([]))
+        self.assertIsNone(latest_session_id("/foo/bar", retries=1))
+
+    @patch("goal_devin.core.run_devin")
+    def test_picks_first_matching_when_multiple(self, mock_run):
+        """Multiple sessions match cwd -> first match returned."""
+        mock_run.return_value = self._cp(json.dumps([
+            {"id": "sid-first", "working_directory": "/foo/bar"},
+            {"id": "sid-second", "working_directory": "/foo/bar"},
+        ]))
+        self.assertEqual(latest_session_id("/foo/bar", retries=1), "sid-first")
 
 
 class TestGoalLoop(unittest.TestCase):

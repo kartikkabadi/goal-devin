@@ -193,7 +193,10 @@ def find_state_by_session_id(session_id):
 
 
 def latest_session_id(cwd, retries=3, delay=1.0):
-    """Most recent devin session id in cwd, or None. Retries to handle list lag."""
+    """Most recent devin session id in cwd, or None. Retries to handle list lag.
+
+    No fallback to sessions[0] — wrong session could resume another goal's work.
+    """
     cwd_resolved = str(Path(cwd).resolve())
     for _ in range(retries):
         r = run_devin(["list", "--format", "json"])
@@ -208,9 +211,6 @@ def latest_session_id(cwd, retries=3, delay=1.0):
         for s in sessions:
             if Path(s.get("working_directory", "")).resolve() == Path(cwd_resolved):
                 return s.get("id")
-        if sessions:
-            # ponytail: fallback to most recent if cwd match fails — devin may report cwd differently
-            return sessions[0].get("id")
         time.sleep(delay)
     return None
 

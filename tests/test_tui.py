@@ -4,7 +4,7 @@ Tests the full TUI flow: launch, start goal, see it appear, iter updates,
 kill, error display, startup recovery. Mocks GoalLoop to avoid real devin calls.
 """
 import pytest
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, patch, call
 from goal_devin.tui import GoalDevinApp, GoalListItem
 from goal_devin.core import GoalState, STATUS_STARTING, STATUS_RUNNING, STATUS_STOPPED, STATUS_ERROR, STATUS_KILLED
 
@@ -163,3 +163,72 @@ async def test_goal_list_item_shows_starting_status(app):
         item = lv.query("ListItem")[0]
         assert isinstance(item, GoalListItem)
         assert item.gs.status == STATUS_STARTING
+
+
+async def test_kill_removes_worktree(app):
+    """When goal is killed, worktree is removed from disk."""
+    async with app.run_test() as pilot:
+        gs = GoalState(goal="test", model="glm-5.2", session_id="sid1",
+                       status=STATUS_RUNNING, iters=3,
+                       use_worktree=True, worktree_id="goal-abc",
+                       cwd="/fake/repo")
+        app.goals["sid1"] = gs
+
+        with patch("goal_devin.tui.remove_worktree") as mock_remove:
+            mock_remove.return_value = (True, None)
+            app._on_done("sid1", "killed", 3, 15.0)
+            await pilot.pause()
+
+            mock_remove.assert_called_once_with("goal-abc", cwd="/fake/repo", force=True)
+        assert app.goals["sid1"].status == STATUS_KILLED
+
+
+async def test_max_iters_keeps_worktree(app):
+    """When goal hits max_iters, worktree is NOT removed (user wants to merge)."""
+    async with app.run_test() as pilot:
+        gs = GoalState(goal="test", model="glm-5.2", session_id="sid1",
+                       status=STATUS_RUNNING, iters=10,
+                       use_worktree=True, worktree_id="goal-abc",
+                       cwd="/fake/repo")
+        app.goals["sid1"] = gs
+
+        with patch("goal_devin.tui.remove_worktree") as mock_remove:
+            app._on_done("sid1", "max_iters", 10, 60.0)
+            await pilot.pause()
+
+            mock_remove.assert_not_called()
+        assert app.goals["sid1"].status == STATUS_STOPPED
+
+
+async def test_error_keeps_worktree(app):
+    """When goal errors, worktree is NOT removed (user wants to debug)."""
+    async with app.run_test() as pilot:
+        gs = GoalState(goal="test", model="glm-5.2", session_id="sid1",
+                       status=STATUS_RUNNING, iters=0,
+                       use_worktree=True, worktree_id="goal-abc",
+                       cwd="/fake/repo")
+        app.goals["sid1"] = gs
+
+        with patch("goal_devin.tui.remove_worktree") as mock_remove:
+            app._on_done("sid1", "error", 0, 0)
+            await pilot.pause()
+
+            mock_remove.assert_not_called()
+        assert app.goals["sid1"].status == STATUS_ERROR
+
+
+async def test_kill_without_worktree_does_not_call_remove(app):
+    """Kill on a goal with no worktree does not call remove_worktree."""
+    async with app.run_test() as pilot:
+        gs = GoalState(goal="test", model="glm-5.2", session_id="sid1",
+                       status=STATUS_RUNNING, iters=3,
+                       use_worktree=False, worktree_id=None,
+                       cwd="/fake/repo")
+        app.goals["sid1"] = gs
+
+        with patch("goal_devin.tui.remove_worktree") as mock_remove:
+            app._on_done("sid1", "killed", 3, 15.0)
+            await pilot.pause()
+
+            mock_remove.assert_not_called()
+        assert app.goals["sid1"].status == STATUS_KILLED
