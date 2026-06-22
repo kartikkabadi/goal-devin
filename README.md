@@ -81,20 +81,20 @@ goal-devin
 ### Main screen
 
 ```
-┌─ goal-devin v0.2.0 ─────────────────────────────────┐
+┌─ goal-devin v0.3.0 ─────────────────────────────────┐
 │  Active Goals (↑↓ navigate, Enter for details)      │
 │  ▸ ember-turnover  make tests pass       iter 14    │
 │    quiet-falcon    fix auth bug          iter 3     │
 │                                                      │
 │  [n] new  [r] resume  [s] status  [l] logs          │
-│  [a] advanced  [q] quit                              │
+│  [a] advanced                                        │
 └──────────────────────────────────────────────────────┘
 ```
 
 ### New goal screen
 
 ```
-┌─ New Goal ───────────────────────────────────────────┐
+┌─ New Goal (ctrl+s to start, Esc to cancel) ─────────┐
 │  Goal prompt:                                        │
 │  ┌────────────────────────────────────────────────┐  │
 │  │ make all tests pass                            │  │
@@ -103,7 +103,7 @@ goal-devin
 │  Max iters:    [0]  (0 = forever)                    │
 │  [✓] git worktree (branch isolation)                 │
 │  [✓] devin sandbox (OS isolation)                    │
-│  [Tab] next  [Enter] start  [Esc] cancel             │
+│  [Tab] next  [ctrl+s] start  [Esc] cancel            │
 └──────────────────────────────────────────────────────┘
 ```
 
@@ -128,14 +128,14 @@ goal-devin
 
 ```
 ┌─ Advanced ───────────────────────────────────────────┐
-│  [m] model picker         change default model       │
-│  [p] permission mode      dangerous / auto / smart   │
-│  [w] worktree mgmt        list / create / remove     │
-│  [t] iter timeout         per-iter timeout           │
-│  [s] sleep between iters  seconds between iterations │
-│  [k] kill session         stop a running goal        │
-│  [e] export session       export conversation        │
-│  [d] delete state         remove a goal's state      │
+│  [m] model info           show default model         │
+│  [p] permission info      show permission mode       │
+│  [w] worktree list        list goal-devin worktrees  │
+│  [t] iter timeout         show per-iter timeout      │
+│  [s] sleep between iters  show sleep interval        │
+│  [k] kill session         how to kill a goal         │
+│  [e] export session       how to export a session    │
+│  [d] delete state         how to delete state files  │
 └──────────────────────────────────────────────────────┘
 ```
 
@@ -148,11 +148,11 @@ goal-devin
 | `s` | toggle status panel |
 | `l` | logs for selected |
 | `a` | advanced menu |
-| `q` | quit |
 | `↑↓` | navigate goal list |
 | `Enter` | open goal detail |
 | `Esc` | back / cancel |
 | `Tab` | next field in forms |
+| `ctrl+s` | start goal (in new goal form) |
 | `p` | pause/resume (in detail) |
 | `k` | kill (in detail) |
 | `m` | merge worktree (in detail) |
@@ -324,7 +324,7 @@ Each iteration's output is logged to `~/.goal-devin/logs/<session-id>.log`. Stat
 git clone https://github.com/kartikkabadi/goal-devin
 cd goal-devin
 uv sync
-uv run pytest              # run tests (30 tests)
+uv run pytest              # run tests (52 tests)
 uv run goal-devin          # run TUI locally
 ```
 

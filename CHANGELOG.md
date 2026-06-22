@@ -5,6 +5,40 @@ All notable changes to goal-devin will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] - 2026-06-22
+
+### Added
+- In-memory goal registry — GoalDevinApp maintains `session_id -> GoalState` dict as the single source of truth for the TUI while running. State files remain for cross-restart persistence only.
+- Real-time TUI updates via callbacks — GoalLoop's on_iter/on_status/on_done now update the in-memory GoalState via `call_from_thread`, replacing 2-second file polling.
+- Pre-iter-0 state — goals appear in the list instantly with status="starting" before the first devin call completes. Session ID is remapped from temp key to real ID on first iter.
+- Live elapsed timer — 1-second timer updates elapsed time for running goals without re-reading files.
+- Toast notifications — error and completion notifications via Textual's `notify()`.
+- Startup recovery — on mount, all state files are loaded into the registry as "stopped" so previous-session goals are visible.
+- ctrl+s keybinding in NewGoalScreen to start a goal without a mouse.
+- 9 TUI integration tests using Textual's `run_test()` pilot (start, iter, kill, error, recovery).
+- pytest-asyncio dev dependency for async TUI tests.
+
+### Changed
+- MainScreen reads from `app.goals` registry instead of `all_states()` disk scan.
+- GoalDetailScreen reads from registry, refreshes info panel + log tail every 1s.
+- GoalListItem renders from GoalState with status, iters, elapsed.
+- GoalListItem no longer renders unused model/last_output fields.
+- AdvancedScreen actions are info-only (show current settings, don't change them).
+- CONTRIBUTING.md updated — reflects multi-module structure and textual dep.
+- README updated — ctrl+s binding, removed q binding, corrected test count (52), accurate AdvancedScreen docs.
+
+### Fixed
+- AdvancedScreen `action_worktree` crashed with NameError — `wt` module was never imported. Now uses `list_worktrees` directly.
+- GoalListItem had unused `model` and `last` variables.
+- Inline imports in MainScreen._tick_elapsed and action_resume_goal moved to module level.
+- core.py had unused `field` import from dataclasses.
+- SECURITY.md hardening section used wrong CLI syntax (`goal-devin goal` instead of `goal-devin -- goal`).
+
+### Removed
+- 2-second file-polling timer in MainScreen (replaced by callback-driven updates).
+- 'q' keybinding (ctrl+c quits the TUI).
+
+
 ## [0.2.0] - 2026-06-22
 
 ### Added

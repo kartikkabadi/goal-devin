@@ -14,7 +14,7 @@ Do not open a public issue for security vulnerabilities. I will acknowledge with
 
 If running unattended or on untrusted goals:
 
-1. **Use Devin's sandbox mode.** `goal-devin goal "..." --permission-mode auto` — Devin will prompt for dangerous operations instead of auto-approving.
+1. **Use Devin's sandbox mode.** `goal-devin -- goal "..." --no-sandbox` disables OS-level isolation. Keep `--sandbox` on (default) to restrict file writes and network access. To require manual approval for dangerous operations, use `--permission-mode auto` instead of the default `dangerous`.
 2. **Set `--iter-timeout`.** Default is 1800s (30 min). Lower it if you want faster failure on hung iterations.
 3. **Set `--max-iters`.** Don't let the loop run forever on untrusted goals. `--max-iters 10` caps the burn.
 4. **Read the logs.** `goal-devin logs` shows every iteration's output. Check what the model actually did.

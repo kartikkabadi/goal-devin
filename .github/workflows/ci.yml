@@ -16,6 +16,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Socket Firewall
+        uses: socketdev/action@v1.3.1
+        with:
+          mode: firewall-free
+
       - name: Install uv
         uses: astral-sh/setup-uv@v6
 
@@ -23,7 +28,7 @@ jobs:
         run: uv python install ${{ matrix.python-version }}
 
       - name: Install dependencies
-        run: uv sync --dev
+        run: sfw uv sync --dev
 
       - name: Run tests
         run: uv run pytest -v
@@ -36,6 +41,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Socket Firewall
+        uses: socketdev/action@v1.3.1
+        with:
+          mode: firewall-free
+
       - name: Install uv
         uses: astral-sh/setup-uv@v6
 
@@ -43,7 +53,7 @@ jobs:
         run: uv python install 3.12
 
       - name: Install dependencies
-        run: uv sync --dev
+        run: sfw uv sync --dev
 
       - name: Check import syntax
         run: uv run python -c "import goal_devin.cli; import goal_devin.tui; import goal_devin.core; import goal_devin.worktree; print('ok')"
@@ -53,6 +63,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
+      - name: Socket Firewall
+        uses: socketdev/action@v1.3.1
+        with:
+          mode: firewall-free
 
       - name: Install uv
         uses: astral-sh/setup-uv@v6

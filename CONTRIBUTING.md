@@ -13,8 +13,8 @@ uv run pytest
 
 ## Rules
 
-- **Zero dependencies.** Stdlib only. If you need a dep, it doesn't belong here.
-- **One file does the work.** `src/goal_devin/cli.py` is the whole tool. Don't split it into modules unless there's a real reason.
+- **Minimal dependencies.** `textual` is the only dep (for the TUI). Stdlib for everything else. If you need another dep, it doesn't belong here.
+- **Module structure.** `core.py` (state + GoalLoop), `tui.py` (Textual TUI), `cli.py` (hidden CLI), `worktree.py` (git worktrees). Don't add modules unless there's a real reason.
 - **Ponytail.** Shortest working diff wins. No speculative abstractions, no boilerplate "for later", no config for values that never change.
 - **Surgical edits.** Touch only what you must. Match existing style. Don't refactor things that aren't broken.
 
@@ -23,7 +23,7 @@ uv run pytest
 1. Open an issue describing the bug or feature.
 2. Branch from `main`.
 3. Make your change. Keep the diff short.
-4. Add or update tests in `tests/test_cli.py`.
+4. Add or update tests in the appropriate `tests/test_*.py` file.
 5. Run `uv run pytest` — must pass.
 6. Open a PR. Reference the issue.
 
@@ -32,10 +32,10 @@ uv run pytest
 ```bash
 uv run pytest              # all tests
 uv run pytest -v           # verbose
-uv run python -m unittest tests/test_cli.py  # without pytest
+uv run pytest tests/test_core.py   # just core tests
 ```
 
-Tests use stdlib `unittest` so they run without pytest installed, but pytest is the dev convenience runner.
+TUI tests use `pytest-asyncio` + Textual's `run_test()` pilot. Core and CLI tests use stdlib `unittest`.
 
 ## Style
 
@@ -59,7 +59,7 @@ No `feat:` / `fix:` prefixes. Plain English.
 
 Maintainers only:
 
-1. Update `__version__` in `src/goal_devin/__init__.py` and `cli.py`.
+1. Update `__version__` in `src/goal_devin/__init__.py` and `pyproject.toml`.
 2. Update `CHANGELOG.md`.
 3. Tag: `git tag v0.X.Y && git push --tags`.
 4. The CI publishes to PyPI on tag push (if configured).

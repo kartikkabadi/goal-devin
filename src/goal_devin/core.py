@@ -4,7 +4,7 @@ UI-agnostic. Both the TUI and the hidden CLI call this module.
 """
 import hashlib
 import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 import os
 import platform
 import re

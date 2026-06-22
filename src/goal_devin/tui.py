@@ -10,7 +10,9 @@ Screens:
 from __future__ import annotations
 
 import os
+import time
 import uuid
+from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
 
@@ -31,7 +33,7 @@ from .core import (
     GoalLoop, GoalState, all_states, fmt_elapsed,
     read_log_tail, log_path, MODELS, DEFAULTS, notify_desktop,
 )
-from .worktree import is_git_repo, create_worktree, merge_worktree
+from .worktree import is_git_repo, create_worktree, merge_worktree, list_worktrees
 
 
 CSS = """
@@ -128,10 +130,8 @@ class GoalListItem(ListItem):
         if len(goal) > 50:
             goal = goal[:47] + "..."
         iters = gs.iters
-        model = gs.model or "?"
         status = gs.status
         elapsed = fmt_elapsed(gs.elapsed) if gs.elapsed else "0s"
-        last = gs.last_output[:60] if gs.last_output else ""
         super().__init__(Label(f"  {sid:<20} {goal:<50} iter {iters}  {elapsed}  [{status}]", classes="goal-item"))
 
 
@@ -169,13 +169,11 @@ class MainScreen(Screen):
 
     def _tick_elapsed(self) -> None:
         """Update elapsed time for running goals and refresh the list."""
-        import time as _time
-        now = _time.time()
+        now = time.time()
         changed = False
         for gs in self.app.goals.values():
             if gs.status == core.STATUS_RUNNING and gs.started_at:
                 try:
-                    from datetime import datetime
                     started = datetime.fromisoformat(gs.started_at).timestamp()
                     gs.elapsed = now - started
                     changed = True
@@ -258,7 +256,6 @@ class MainScreen(Screen):
             self.app.push_screen(GoalDetailScreen(sid, gs))
             return
         # Convert GoalState to dict for resume_goal
-        from dataclasses import asdict
         self.app.resume_goal(asdict(gs))
 
     def action_logs(self) -> None:
@@ -514,7 +511,7 @@ class AdvancedScreen(Screen):
             f"  permission mode: {DEFAULTS['permission_mode']} (set via GOAL_DEVIN_PERMISSION_MODE env)")
 
     def action_worktree(self) -> None:
-        wts = wt.list_worktrees()
+        wts = list_worktrees()
         if not wts:
             self.query_one("#advanced-status").update("  no worktrees found")
             return
