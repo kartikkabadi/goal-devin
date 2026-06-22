@@ -59,7 +59,8 @@ async def test_iter_updates_goal_state(app):
                        status=STATUS_STARTING)
         app.goals[track_key] = gs
 
-        app._on_iter(track_key, "real-sid", 1, "did something\nlast line", 5.0)
+        key_holder = [track_key]
+        app._on_iter(key_holder, "real-sid", 1, "did something\nlast line", 5.0)
         await pilot.pause()
 
         # Registry should have remapped to real session_id
@@ -70,6 +71,8 @@ async def test_iter_updates_goal_state(app):
         assert gs.iters == 1
         assert gs.last_output == "last line"
         assert gs.elapsed == 5.0
+        # key_holder should be updated so on_done/on_status use the new key
+        assert key_holder[0] == "real-sid"
 
 
 async def test_done_updates_status_to_stopped(app):
@@ -84,6 +87,61 @@ async def test_done_updates_status_to_stopped(app):
 
         assert app.goals["sid1"].status == STATUS_STOPPED
         assert app.goals["sid1"].iters == 5
+
+
+async def test_done_after_remap_uses_updated_key(app):
+    """on_done closure must use the remapped key, not the original track_key.
+
+    This is the real flow: start_goal creates a tmp- key, _on_iter remaps it
+    to the real session_id, then _on_done is called. If on_done uses the
+    stale track_key, it can't find the goal and status never updates.
+    """
+    async with app.run_test() as pilot:
+        track_key = "tmp-abc"
+        gs = GoalState(goal="test", model="glm-5.2", session_id=track_key,
+                       status=STATUS_RUNNING, iters=3,
+                       use_worktree=True, worktree_id="goal-xyz",
+                       cwd="/fake/repo")
+        app.goals[track_key] = gs
+        mock_loop = MagicMock()
+        app.loops[track_key] = mock_loop
+
+        # Simulate the closure flow: key_holder is shared between callbacks
+        key_holder = [track_key]
+
+        # _on_iter remaps the key
+        app._on_iter(key_holder, "real-sid", 1, "output", 5.0)
+        await pilot.pause()
+        assert key_holder[0] == "real-sid"
+        assert "real-sid" in app.goals
+        assert "tmp-abc" not in app.goals
+
+        # _on_done uses key_holder[0] — must find the goal under "real-sid"
+        with patch("goal_devin.tui.remove_worktree") as mock_remove:
+            mock_remove.return_value = (True, None)
+            app._on_done(key_holder[0], "killed", 3, 15.0)
+            await pilot.pause()
+
+            assert app.goals["real-sid"].status == STATUS_KILLED
+            mock_remove.assert_called_once_with("goal-xyz", cwd="/fake/repo", force=True)
+        # dead loop should be removed from self.loops
+        assert "real-sid" not in app.loops
+
+
+async def test_done_removes_dead_loop_from_registry(app):
+    """_on_done must pop the dead loop from self.loops so resume works."""
+    async with app.run_test() as pilot:
+        gs = GoalState(goal="test", model="glm-5.2", session_id="sid1",
+                       status=STATUS_RUNNING, iters=5)
+        app.goals["sid1"] = gs
+        mock_loop = MagicMock()
+        app.loops["sid1"] = mock_loop
+
+        assert "sid1" in app.loops
+        app._on_done("sid1", "max_iters", 5, 30.0)
+        await pilot.pause()
+
+        assert "sid1" not in app.loops
 
 
 async def test_done_with_error_shows_error_status(app):

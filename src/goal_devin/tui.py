@@ -710,14 +710,18 @@ class GoalDevinApp(App):
         self._refresh_main_screen()
         self.notify(f"started goal: {goal[:40]}", timeout=5)
 
+        # Mutable container — _on_iter updates it when remapping tmp-key to
+        # real session_id, so on_done/on_status use the current dict key.
+        key_holder = [track_key]
+
         def on_iter(iters, sid, output, elapsed):
-            self.call_from_thread(self._on_iter, track_key, sid, iters, output, elapsed)
+            self.call_from_thread(self._on_iter, key_holder, sid, iters, output, elapsed)
 
         def on_status(status, detail):
-            self.call_from_thread(self._on_status, track_key, status, detail)
+            self.call_from_thread(self._on_status, key_holder[0], status, detail)
 
         def on_done(reason, iters, elapsed):
-            self.call_from_thread(self._on_done, track_key, reason, iters, elapsed)
+            self.call_from_thread(self._on_done, key_holder[0], reason, iters, elapsed)
 
         loop = GoalLoop(
             goal=goal,
@@ -788,13 +792,15 @@ class GoalDevinApp(App):
         loop.start()
         self.loops[session_id] = loop
 
-    def _on_iter(self, track_key, sid, iters, output, elapsed):
+    def _on_iter(self, key_holder, sid, iters, output, elapsed):
         """Update GoalState on each iteration."""
+        track_key = key_holder[0]
         gs = self.goals.get(track_key)
         if gs:
             # Remap temp key to real session_id on first iter
             if track_key != sid:
                 self.goals[sid] = self.goals.pop(track_key)
+                key_holder[0] = sid  # so on_done/on_status use the new key
                 gs = self.goals[sid]
                 # Also remap loops dict
                 if track_key in self.loops:
@@ -835,6 +841,9 @@ class GoalDevinApp(App):
                 gs.status = core.STATUS_ERROR
             else:
                 gs.status = core.STATUS_STOPPED
+        # Remove dead loop from registry so resume works — without this,
+        # action_resume_goal sees a dead loop and pushes detail instead.
+        self.loops.pop(track_key, None)
         if reason == "max_iters":
             msg = f"goal done — {iters} iters in {elapsed_str}"
         elif reason == "killed":
