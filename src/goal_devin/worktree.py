@@ -66,14 +66,6 @@ def main_repo_root(cwd=None):
     return None
 
 
-def worktree_path(session_id, cwd=None):
-    """Path for a session's worktree: <repo-root>/.goal-wt/<session-id>/"""
-    root = repo_root(cwd)
-    if not root:
-        return None
-    return root / WORKTREE_DIR / session_id
-
-
 def branch_name(session_id):
     return f"{BRANCH_PREFIX}/{session_id}"
 
@@ -83,7 +75,7 @@ def create_worktree(session_id, cwd=None):
     if not is_git_repo(cwd):
         return None, "not a git repo"
     root = repo_root(cwd)
-    wt = worktree_path(session_id, cwd)
+    wt = root / WORKTREE_DIR / session_id
     branch = branch_name(session_id)
     # ensure .goal-wt is gitignored
     _ensure_gitignore(root)

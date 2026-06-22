@@ -19,7 +19,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 - `main_repo_root` function in worktree.py — resolves the main repo root from any cwd inside a repo, including linked worktrees. Uses `git rev-parse --git-common-dir`.
 - `_escape_applescript` function in core.py — escapes strings for safe AppleScript interpolation.
-- 10 new tests: session resolution edge cases (missing workdir, empty list, multiple matches), worktree cleanup (kill removes, max_iters keeps, error keeps, no-worktree no-remove, shutdown cleanup, remove from worktree cwd, merge from worktree cwd), AppleScript escape (plain, quote, backslash, injection attempt).
+
+### Removed
+- `parse_devin_models` — dead code. Defined but never called from app code (TUI uses hardcoded MODELS list). Deleted function, `re` import, and 2 tests.
+- `worktree_path` — inlined into `create_worktree`. Was the only caller, and the function called `repo_root(cwd)` internally which duplicated the `repo_root(cwd)` call already in `create_worktree`. Deleted function and test.
 
 
 ## [0.3.0] - 2026-06-22

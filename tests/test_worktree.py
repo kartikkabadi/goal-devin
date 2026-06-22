@@ -7,9 +7,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
-from goal_devin import worktree as wt
 from goal_devin.worktree import (
-    is_git_repo, repo_root, main_repo_root, branch_name, worktree_path,
+    is_git_repo, repo_root, main_repo_root, branch_name,
     create_worktree, remove_worktree, list_worktrees, merge_worktree,
 )
 
@@ -65,14 +64,6 @@ class TestWorktreeHelpers(unittest.TestCase):
             # main_repo_root from worktree returns the MAIN repo root
             mrr = main_repo_root(str(wt_path))
             self.assertEqual(Path(mrr), Path(tmp).resolve())
-
-    def test_worktree_path(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            _init_repo(tmp)
-            p = worktree_path("abc", cwd=tmp)
-            self.assertIsNotNone(p)
-            self.assertEqual(p.name, "abc")
-            self.assertEqual(p.parent.name, ".goal-wt")
 
 
 class TestCreateRemoveWorktree(unittest.TestCase):

@@ -11,7 +11,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 from goal_devin import core
 from goal_devin.core import (
     fmt_elapsed, state_file_for, load_state, save_state, all_states,
-    read_log_tail, GoalLoop, MODELS, parse_devin_models, latest_session_id,
+    read_log_tail, GoalLoop, MODELS, latest_session_id,
     STATUS_RUNNING, STATUS_PAUSED, STATUS_KILLED,
 )
 
@@ -103,24 +103,6 @@ class TestModels(unittest.TestCase):
 
     def test_kimi_in_models(self):
         self.assertIn("kimi-k2.7", MODELS)
-
-
-class TestParseDevinModels(unittest.TestCase):
-    @patch("goal_devin.core.run_devin")
-    def test_parse_success(self, mock_run):
-        cp = MagicMock()
-        cp.returncode = 0
-        cp.stdout = ""
-        cp.stderr = "Error: Unknown model: 'foo'\nAvailable: glm-5.2, kimi-k2.7, gpt-5.5"
-        mock_run.return_value = cp
-        models = parse_devin_models()
-        self.assertIsNotNone(models)
-        self.assertIn("glm-5.2", models)
-        self.assertIn("kimi-k2.7", models)
-
-    @patch("goal_devin.core.run_devin", side_effect=FileNotFoundError())
-    def test_parse_no_devin(self, _):
-        self.assertIsNone(parse_devin_models())
 
 
 class TestLatestSessionId(unittest.TestCase):

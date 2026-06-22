@@ -7,7 +7,6 @@ import json
 from dataclasses import dataclass
 import os
 import platform
-import re
 import shutil
 import subprocess
 import sys
@@ -34,7 +33,7 @@ DEFAULTS = {
     "use_sandbox": os.environ.get("GOAL_DEVIN_SANDBOX", "1") not in ("0", "false", ""),
 }
 
-# --- models (hardcoded, refreshable via parse_devin_models) ---
+# --- models (hardcoded list for TUI select) ---
 MODELS = [
     "glm-5.2", "glm-5.1",
     "kimi-k2.7", "kimi-k2.6",
@@ -165,23 +164,6 @@ def run_devin(args, timeout=None):
     except subprocess.TimeoutExpired:
         return subprocess.CompletedProcess(cmd, returncode=124, stdout="",
                                            stderr=f"timed out after {timeout}s")
-
-
-def parse_devin_models():
-    """Parse available models from `devin --help` output. Returns list or None."""
-    try:
-        r = run_devin(["--help"])
-    except FileNotFoundError:
-        return None
-    if r.returncode != 0:
-        return None
-    # ponytail: parse "Available: ..." line from error output — fragile but works
-    m = re.search(r"Available:\s*(.+)", r.stderr + r.stdout)
-    if not m:
-        return None
-    raw = m.group(1)
-    models = [s.strip().rstrip(",") for s in raw.split(",")]
-    return [m for m in models if m]
 
 
 def find_state_by_session_id(session_id):
