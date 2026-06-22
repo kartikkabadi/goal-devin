@@ -81,7 +81,7 @@ goal-devin
 ### Main screen
 
 ```
-┌─ goal-devin v0.4.0 ─────────────────────────────────┐
+┌─ goal-devin v0.4.1 ─────────────────────────────────┐
 │  Active Goals (↑↓ navigate, Enter for details)      │
 │  ▸ ember-turnover  make tests pass       iter 14    │
 │    quiet-falcon    fix auth bug          iter 3     │
@@ -324,7 +324,7 @@ Each iteration's output is logged to `~/.goal-devin/logs/<session-id>.log`. Stat
 git clone https://github.com/kartikkabadi/goal-devin
 cd goal-devin
 uv sync
-uv run pytest              # run tests (71 tests)
+uv run pytest              # run tests (74 tests)
 uv run goal-devin          # run TUI locally
 ```
 
