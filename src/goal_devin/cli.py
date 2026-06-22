@@ -12,18 +12,20 @@ Usage:
   goal-devin -- version                # hidden CLI: version
 """
 import argparse
+import json
 import os
 import sys
+import threading
 import time
+import uuid
 from pathlib import Path
 
 from . import core
 from .core import (
-    GoalLoop, load_state, save_state, all_states, log_path,
-    read_log_tail, fmt_elapsed, DEFAULTS, MODELS, notify,
+    GoalLoop, load_state, all_states, find_state_by_session_id, log_path,
+    fmt_elapsed, DEFAULTS, notify,
 )
-from . import worktree as wt
-from .worktree import is_git_repo, create_worktree, remove_worktree, merge_worktree
+from .worktree import is_git_repo, create_worktree
 
 
 # --- ANSI colors (stdlib) ---
@@ -46,26 +48,12 @@ def _c(text, color):
     return f"{color}{text}{C.RESET}"
 
 
-def cmd_goal(args):
-    """Start a goal loop (blocking, Ctrl+C to stop)."""
-    use_worktree = args.worktree and is_git_repo()
-    use_sandbox = args.sandbox
-    cwd = os.getcwd()
-
-    if use_worktree:
-        import uuid
-        temp_id = f"goal-{uuid.uuid4().hex[:8]}"
-        wt_path, err = create_worktree(temp_id, cwd=cwd)
-        if wt_path:
-            cwd = str(wt_path)
-            print(f"  {_c('worktree', C.CYAN)} {wt_path}")
-        else:
-            print(f"  {_c('warn', C.YELLOW)} worktree failed: {err}")
-            use_worktree = False
-
-    permission_mode = "autonomous" if use_sandbox else args.permission_mode
-
-    done_event = __import__("threading").Event()
+def _run_goal_loop(goal, session_id=None, model=None, permission_mode=None,
+                   sleep_secs=None, max_iters=None, iter_timeout=None,
+                   use_worktree=False, use_sandbox=False, cwd=None,
+                   worktree_id=None):
+    """Start a GoalLoop and block until it finishes or Ctrl+C. Returns exit code."""
+    done_event = threading.Event()
     result = {"reason": None, "iters": 0, "elapsed": 0}
 
     def on_iter(iters, sid, output, elapsed):
@@ -87,25 +75,31 @@ def cmd_goal(args):
             print(f"  {_c('error', C.RED)}: {detail}", file=sys.stderr)
 
     loop = GoalLoop(
-        goal=args.prompt,
-        model=args.model,
+        goal=goal,
+        session_id=session_id,
+        model=model,
         permission_mode=permission_mode,
-        sleep_secs=args.sleep,
-        max_iters=args.max_iters,
-        iter_timeout=args.iter_timeout,
+        sleep_secs=sleep_secs,
+        max_iters=max_iters,
+        iter_timeout=iter_timeout,
         use_worktree=use_worktree,
         use_sandbox=use_sandbox,
         cwd=cwd,
+        worktree_id=worktree_id,
         on_iter=on_iter,
         on_status=on_status,
         on_done=on_done,
     )
     loop.start()
+
     print(f"  {_c('goal-devin', C.BOLD)} v{core.__version__}")
-    print(f"  {_c('goal', C.BOLD)}   {args.prompt}")
-    print(f"  {_c('model', C.BOLD)}  {_c(args.model or DEFAULTS['model'], C.CYAN)}")
+    print(f"  {_c('goal', C.BOLD)}   {goal}")
+    sid_display = session_id or _c("(new session)", C.DIM)
+    print(f"  {_c('model', C.BOLD)}  {_c(loop.model, C.CYAN)}  {sid_display}")
     if use_sandbox:
         print(f"  {_c('sandbox', C.BOLD)} on (autonomous mode)")
+    if use_worktree:
+        print(f"  {_c('worktree', C.BOLD)} {cwd}")
     print()
 
     try:
@@ -128,25 +122,72 @@ def cmd_goal(args):
     return 0 if reason != "error" else 1
 
 
+def cmd_goal(args):
+    """Start a new goal loop (blocking, Ctrl+C to stop)."""
+    use_worktree = args.worktree and is_git_repo()
+    use_sandbox = args.sandbox
+    cwd = os.getcwd()
+    worktree_id = None
+
+    if use_worktree:
+        worktree_id = f"goal-{uuid.uuid4().hex[:8]}"
+        wt_path, err = create_worktree(worktree_id, cwd=cwd)
+        if wt_path:
+            cwd = str(wt_path)
+        else:
+            print(f"  {_c('warn', C.YELLOW)} worktree failed: {err}")
+            use_worktree = False
+            worktree_id = None
+
+    permission_mode = "autonomous" if use_sandbox else args.permission_mode
+    return _run_goal_loop(
+        goal=args.prompt,
+        model=args.model,
+        permission_mode=permission_mode,
+        sleep_secs=args.sleep,
+        max_iters=args.max_iters,
+        iter_timeout=args.iter_timeout,
+        use_worktree=use_worktree,
+        use_sandbox=use_sandbox,
+        cwd=cwd,
+        worktree_id=worktree_id,
+    )
+
+
 def cmd_resume(args):
-    """Resume a goal loop."""
+    """Resume a goal loop on an existing session."""
     state = load_state() or {}
     session_id = args.session_id or state.get("session_id")
     if not session_id:
         print(f"  {_c('error', C.RED)}: no session to resume.", file=sys.stderr)
         return 1
+    # if current cwd has no state, search all states for this session_id
+    if not state.get("session_id"):
+        found = find_state_by_session_id(session_id)
+        if found:
+            state = found
     goal = args.goal or state.get("goal")
     if not goal:
         print(f"  {_c('error', C.RED)}: no goal recorded.", file=sys.stderr)
         return 1
-    # resume is just goal with existing session_id
-    args.prompt = goal
-    args.model = args.model or state.get("model")
-    args.permission_mode = args.permission_mode or state.get("permission_mode")
-    args.worktree = state.get("use_worktree", False)
-    args.sandbox = state.get("use_sandbox", False)
-    # skip worktree creation since it already exists
-    return cmd_goal(args)
+    cwd = state.get("cwd", os.getcwd())
+    worktree_id = state.get("worktree_id")
+    use_worktree = state.get("use_worktree", False)
+    use_sandbox = state.get("use_sandbox", False)
+    permission_mode = "autonomous" if use_sandbox else (args.permission_mode or state.get("permission_mode"))
+    return _run_goal_loop(
+        goal=goal,
+        session_id=session_id,
+        model=args.model or state.get("model"),
+        permission_mode=permission_mode,
+        sleep_secs=args.sleep,
+        max_iters=args.max_iters,
+        iter_timeout=args.iter_timeout,
+        use_worktree=use_worktree,
+        use_sandbox=use_sandbox,
+        cwd=cwd,
+        worktree_id=worktree_id,
+    )
 
 
 def cmd_status(args):
@@ -177,7 +218,6 @@ def cmd_status(args):
     if not state:
         print(f"  {_c('none', C.DIM)} — no goal state in this directory.")
         return 0
-    import json
     print(json.dumps(state, indent=2))
     lp = log_path(state.get("session_id", ""))
     if lp.exists():
@@ -283,19 +323,16 @@ def main(argv=None):
     """Entry point. No args → TUI. Subcommands → hidden CLI."""
     if argv is None:
         argv = sys.argv[1:]
-    # no args → TUI
     if not argv:
         from .tui import run_tui
         run_tui()
         return 0
-    # help/version flags without -- → TUI or help
     if argv in (["--help"], ["-h"], ["help"]):
         build_parser().print_help()
         return 0
     if argv in (["version"], ["--version"], ["-V"]):
         print(f"goal-devin {core.__version__}")
         return 0
-    # otherwise treat as CLI subcommands
     args = build_parser().parse_args(argv)
     core.ensure_dirs()
     if not getattr(args, "func", None):

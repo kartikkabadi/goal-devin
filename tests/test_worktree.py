@@ -10,7 +10,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 from goal_devin import worktree as wt
 from goal_devin.worktree import (
     is_git_repo, repo_root, branch_name, worktree_path,
-    create_worktree, remove_worktree, list_worktrees,
+    create_worktree, remove_worktree, list_worktrees, merge_worktree,
 )
 
 
@@ -89,6 +89,22 @@ class TestListWorktrees(unittest.TestCase):
             wts = list_worktrees(cwd=tmp)
             self.assertEqual(len(wts), 1)
             self.assertTrue(wts[0]["branch"].replace("refs/heads/", "").startswith("goal-devin/"))
+
+
+
+class TestMergeWorktree(unittest.TestCase):
+    """merge_worktree must use the worktree_id (not the devin session_id)."""
+
+    def test_merge_uses_worktree_id(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            _init_repo(tmp)
+            create_worktree("goal-abc123", cwd=tmp)
+            wt_dir = Path(tmp) / ".goal-wt" / "goal-abc123"
+            (wt_dir / "newfile").write_text("content")
+            subprocess.run(["git", "add", "-A"], cwd=wt_dir, capture_output=True)
+            subprocess.run(["git", "commit", "-m", "test change"], cwd=wt_dir, capture_output=True)
+            ok, err = merge_worktree("goal-abc123", cwd=tmp)
+            self.assertTrue(ok, f"merge failed: {err}")
 
 
 if __name__ == "__main__":

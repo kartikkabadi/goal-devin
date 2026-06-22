@@ -159,6 +159,65 @@ class TestGoalLoop(unittest.TestCase):
                         permission_mode="dangerous", cwd="/fake")
         self.assertEqual(loop.permission_mode, "dangerous")
 
+    def test_worktree_id_stored(self):
+        """worktree_id is preserved on the loop instance."""
+        loop = GoalLoop(goal="test", cwd="/fake", worktree_id="goal-abc123")
+        self.assertEqual(loop.worktree_id, "goal-abc123")
+
+    def test_worktree_id_defaults_none(self):
+        loop = GoalLoop(goal="test", cwd="/fake")
+        self.assertIsNone(loop.worktree_id)
+
+    @patch("goal_devin.core.subprocess.Popen")
+    def test_run_devin_passes_cwd(self, mock_popen):
+        """_run_devin passes self.cwd to Popen — critical for worktree isolation."""
+        mock_proc = MagicMock()
+        mock_proc.communicate.return_value = ("output", "")
+        mock_proc.returncode = 0
+        mock_popen.return_value = mock_proc
+        loop = GoalLoop(goal="test", cwd="/some/worktree/path")
+        loop._run_devin(["-p", "test"])
+        _, kwargs = mock_popen.call_args
+        self.assertEqual(kwargs.get("cwd"), "/some/worktree/path")
+
+    @patch("goal_devin.core.subprocess.Popen")
+    def test_run_devin_default_cwd(self, mock_popen):
+        """_run_devin uses process cwd when no cwd specified."""
+        mock_proc = MagicMock()
+        mock_proc.communicate.return_value = ("output", "")
+        mock_proc.returncode = 0
+        mock_popen.return_value = mock_proc
+        loop = GoalLoop(goal="test")
+        loop._run_devin(["-p", "test"])
+        _, kwargs = mock_popen.call_args
+        self.assertIn("cwd", kwargs)
+
+
+class TestNotifySplit(unittest.TestCase):
+    """notify_desktop and notify_bell are separate — bell must not fire in TUI."""
+
+    @patch("goal_devin.core.notify_bell")
+    @patch("goal_devin.core.notify_desktop")
+    def test_notify_calls_both_by_default(self, mock_desktop, mock_bell):
+        core.notify("title", "msg")
+        mock_desktop.assert_called_once_with("title", "msg")
+        mock_bell.assert_called_once()
+
+    @patch("goal_devin.core.notify_bell")
+    @patch("goal_devin.core.notify_desktop")
+    def test_notify_bell_suppressed_when_false(self, mock_desktop, mock_bell):
+        core.notify("title", "msg", bell=False)
+        mock_desktop.assert_called_once_with("title", "msg")
+        mock_bell.assert_not_called()
+
+
+class TestVersionDedup(unittest.TestCase):
+    """core.__version__ should come from __init__, not be hardcoded."""
+
+    def test_core_version_matches_init(self):
+        from goal_devin import __version__ as init_version
+        self.assertEqual(core.__version__, init_version)
+
 
 if __name__ == "__main__":
     unittest.main()

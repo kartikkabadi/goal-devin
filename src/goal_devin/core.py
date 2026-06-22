@@ -5,6 +5,9 @@ UI-agnostic. Both the TUI and the hidden CLI call this module.
 import hashlib
 import json
 import os
+import platform
+import re
+import shutil
 import subprocess
 import sys
 import threading
@@ -12,7 +15,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-__version__ = "0.2.0"
+from . import __version__
 
 # --- paths ---
 STATE_DIR = Path.home() / ".goal-devin"
@@ -153,13 +156,20 @@ def parse_devin_models():
     if r.returncode != 0:
         return None
     # ponytail: parse "Available: ..." line from error output — fragile but works
-    import re
     m = re.search(r"Available:\s*(.+)", r.stderr + r.stdout)
     if not m:
         return None
     raw = m.group(1)
     models = [s.strip().rstrip(",") for s in raw.split(",")]
     return [m for m in models if m]
+
+
+def find_state_by_session_id(session_id):
+    """Find a state by session_id across all cwds. Returns dict or None."""
+    for state in all_states():
+        if state.get("session_id") == session_id:
+            return state
+    return None
 
 
 def latest_session_id(cwd, retries=3, delay=1.0):
@@ -207,6 +217,7 @@ class GoalLoop:
     def __init__(self, goal, session_id=None, model=None, permission_mode=None,
                  sleep_secs=None, max_iters=None, iter_timeout=None,
                  use_worktree=False, use_sandbox=False, cwd=None,
+                 worktree_id=None,
                  on_iter=None, on_status=None, on_done=None):
         self.goal = goal
         self.session_id = session_id
@@ -223,6 +234,7 @@ class GoalLoop:
         self.use_worktree = use_worktree
         self.use_sandbox = use_sandbox
         self.cwd = cwd or os.getcwd()
+        self.worktree_id = worktree_id
         self.on_iter = on_iter        # callback(iters, session_id, output, elapsed)
         self.on_status = on_status    # callback(status, detail)
         self.on_done = on_done        # callback(reason, iters, elapsed)
@@ -271,10 +283,10 @@ class GoalLoop:
         """Run devin, tracking the subprocess so kill() can terminate it."""
         cmd = ["devin"] + args
         try:
-            self._proc = subprocess.Popen(
-                cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
             with self._proc_lock:
-                pass  # just ensure lock released
+                self._proc = subprocess.Popen(
+                    cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                    text=True, cwd=self.cwd)
             try:
                 stdout, stderr = self._proc.communicate(timeout=self.iter_timeout)
             except subprocess.TimeoutExpired:
@@ -323,6 +335,7 @@ class GoalLoop:
                     "permission_mode": self.permission_mode,
                     "use_worktree": self.use_worktree,
                     "use_sandbox": self.use_sandbox,
+                    "worktree_id": self.worktree_id,
                     "status": STATUS_RUNNING,
                     "started_at": datetime.now().isoformat(timespec="seconds"),
                 }, cwd=self.cwd)
@@ -402,6 +415,7 @@ class GoalLoop:
             "permission_mode": self.permission_mode,
             "use_worktree": self.use_worktree,
             "use_sandbox": self.use_sandbox,
+            "worktree_id": self.worktree_id,
             "status": status,
             "last_iter_at": datetime.now().isoformat(timespec="seconds"),
         })
@@ -409,26 +423,31 @@ class GoalLoop:
 
 
 # --- notifications ---
-def notify(title, message):
+def notify_desktop(title, message):
     """Send a desktop notification. macOS: osascript, Linux: notify-send. No-op if unavailable."""
-    import shutil
-    if sys_platform() == "darwin" and shutil.which("osascript"):
+    plat = platform.system().lower()
+    if plat == "darwin" and shutil.which("osascript"):
         try:
             subprocess.run(["osascript", "-e",
                             f'display notification "{message}" with title "{title}"'],
                            capture_output=True, timeout=5)
         except Exception:
             pass
-    elif sys_platform().startswith("linux") and shutil.which("notify-send"):
+    elif plat.startswith("linux") and shutil.which("notify-send"):
         try:
             subprocess.run(["notify-send", title, message], capture_output=True, timeout=5)
         except Exception:
             pass
-    # terminal bell always
+
+
+def notify_bell():
+    """Terminal bell — only safe in raw CLI mode, not inside a TUI."""
     sys.stdout.write("\a")
     sys.stdout.flush()
 
 
-def sys_platform():
-    import platform
-    return platform.system().lower()
+def notify(title, message, bell=True):
+    """Desktop notification + optional terminal bell. Bell is suppressed in TUI mode."""
+    notify_desktop(title, message)
+    if bell:
+        notify_bell()

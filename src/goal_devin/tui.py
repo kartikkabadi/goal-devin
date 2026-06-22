@@ -10,31 +10,27 @@ Screens:
 from __future__ import annotations
 
 import os
-import time
+import uuid
 from pathlib import Path
 
-from textual import work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.containers import Container, Horizontal, Vertical, VerticalScroll
+from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.reactive import reactive
-from textual.screen import Screen, ModalScreen
+from textual.screen import Screen
 from textual.widgets import (
     Header, Footer, Label, ListItem, ListView, Input, Button,
     Select, Checkbox, RichLog, Static, TextArea,
 )
-from rich.text import Text
 from rich.panel import Panel
 from rich.table import Table
-from rich.markdown import Markdown
 
 from . import core
 from .core import (
-    GoalLoop, all_states, load_state, save_state, fmt_elapsed,
-    read_log_tail, log_path, MODELS, DEFAULTS, notify,
+    GoalLoop, all_states, load_state, fmt_elapsed,
+    read_log_tail, log_path, MODELS, DEFAULTS, notify_desktop,
 )
-from . import worktree as wt
-from .worktree import is_git_repo, create_worktree, remove_worktree, merge_worktree
+from .worktree import is_git_repo, create_worktree, merge_worktree
 
 
 CSS = """
@@ -59,18 +55,6 @@ Screen {
     height: 1fr;
     border: $primary;
     margin: 1 0;
-}
-
-.menu-bar {
-    height: 3;
-    dock: bottom;
-    background: $boost;
-}
-
-.menu-hint {
-    color: $text-muted;
-    text-align: center;
-    padding: 1 2;
 }
 
 .form-container {
@@ -121,32 +105,8 @@ Screen {
     border-bottom: $boost;
 }
 
-.advanced-item:hover {
-    background: $boost;
-}
-
-.advanced-key {
-    color: $accent;
-    text-style: bold;
-    width: 4;
-}
-
-.advanced-desc {
-    color: $text-muted;
-}
-
 .error-text {
     color: $error;
-    text-style: bold;
-}
-
-.success-text {
-    color: $success;
-    text-style: bold;
-}
-
-.warning-text {
-    color: $warning;
     text-style: bold;
 }
 
@@ -154,19 +114,6 @@ Screen {
     color: $text-muted;
 }
 
-.goal-item {
-    padding: 0 1;
-}
-
-.goal-item-selected {
-    background: $accent 20%;
-}
-
-.goal-status-running { color: $success; }
-.goal-status-paused  { color: $warning; }
-.goal-status-stopped { color: $text-muted; }
-.goal-status-killed  { color: $error; }
-.goal-status-error   { color: $error; }
 """
 
 
@@ -193,7 +140,7 @@ class MainScreen(Screen):
 
     BINDINGS = [
         Binding("n", "new_goal", "new"),
-        Binding("r", "resume", "resume"),
+        Binding("r", "resume_goal", "resume"),
         Binding("s", "toggle_status", "status"),
         Binding("l", "logs", "logs"),
         Binding("a", "advanced", "advanced"),
@@ -221,16 +168,18 @@ class MainScreen(Screen):
         self.set_interval(2.0, self.refresh_goals)
 
     def refresh_goals(self) -> None:
-        """Refresh the goal list from state files."""
+        """Refresh the goal list from state files, preserving selection."""
         lv = self.query_one(ListView)
+        prev_index = lv.index
         states = list(all_states())
-        current = lv.index if lv._items else None
         lv.clear()
         for state in states:
             lv.append(GoalListItem(state))
         if not states:
             lv.append(ListItem(Label("  no goals — press n to start one",
                                      classes="dim-text")))
+        if prev_index is not None and prev_index < len(lv._items):
+            lv.index = prev_index
         if self.show_status:
             self._render_status_panel(states)
 
@@ -268,37 +217,42 @@ class MainScreen(Screen):
     def action_new_goal(self) -> None:
         self.app.push_screen(NewGoalScreen())
 
-    def action_resume(self) -> None:
+    def _selected_state(self) -> dict | None:
         lv = self.query_one(ListView)
         if lv.index is None or not lv._items:
-            self.app.bell()
-            return
+            return None
         item = lv._items[lv.index]
         if isinstance(item, GoalListItem):
-            sid = item.state.get("session_id")
-            self.app.push_screen(GoalDetailScreen(sid, item.state))
+            return item.state
+        return None
+
+    def action_resume_goal(self) -> None:
+        """Actually resume a stopped/killed goal's loop."""
+        state = self._selected_state()
+        if not state:
+            self.app.bell()
+            return
+        sid = state.get("session_id")
+        if not sid:
+            self.app.bell()
+            return
+        if self.app.get_loop(sid):
+            self.app.push_screen(GoalDetailScreen(sid, state))
+            return
+        self.app.resume_goal(state)
 
     def action_logs(self) -> None:
-        lv = self.query_one(ListView)
-        if lv.index is None or not lv._items:
-            self.app.bell()
-            return
-        item = lv._items[lv.index]
-        if isinstance(item, GoalListItem):
-            sid = item.state.get("session_id")
-            self.app.push_screen(LogsScreen(sid))
+        state = self._selected_state()
+        if state:
+            self.app.push_screen(LogsScreen(state.get("session_id", "")))
 
     def action_advanced(self) -> None:
         self.app.push_screen(AdvancedScreen())
 
     def action_detail(self) -> None:
-        lv = self.query_one(ListView)
-        if lv.index is None or not lv._items:
-            return
-        item = lv._items[lv.index]
-        if isinstance(item, GoalListItem):
-            sid = item.state.get("session_id")
-            self.app.push_screen(GoalDetailScreen(sid, item.state))
+        state = self._selected_state()
+        if state:
+            self.app.push_screen(GoalDetailScreen(state.get("session_id", ""), state))
 
     def on_list_view_selected(self, event: ListView.Selected) -> None:
         if isinstance(event.item, GoalListItem):
@@ -407,8 +361,8 @@ class GoalDetailScreen(Screen):
         yield Footer()
 
     def on_mount(self) -> None:
-        self._refresh_log()
-        self.set_interval(2.0, self._refresh_log)
+        self._refresh()
+        self.set_interval(2.0, self._refresh)
 
     def _render_info(self) -> Panel:
         s = self.state
@@ -427,7 +381,12 @@ class GoalDetailScreen(Screen):
         )
         return Panel(info, title=self.session_id, border_style="cyan")
 
-    def _refresh_log(self) -> None:
+    def _refresh(self) -> None:
+        """Refresh info panel + log tail from current state."""
+        fresh = load_state(cwd=self.state.get("cwd"))
+        if fresh and fresh.get("session_id") == self.session_id:
+            self.state = fresh
+        self.query_one("#detail-info").update(self._render_info())
         log = self.query_one("#detail-log")
         log.clear()
         tail = read_log_tail(self.session_id, lines=20)
@@ -466,9 +425,10 @@ class GoalDetailScreen(Screen):
         if not self.state.get("use_worktree"):
             self.query_one("#detail-status").update("  no worktree for this goal")
             return
-        ok, err = merge_worktree(self.session_id, cwd=self.state.get("cwd"))
+        wt_id = self.state.get("worktree_id") or self.session_id
+        ok, err = merge_worktree(wt_id, cwd=self.state.get("cwd"))
         if ok:
-            self.query_one("#detail-status").update(f"  merged {self.session_id}")
+            self.query_one("#detail-status").update(f"  merged {wt_id}")
         else:
             self.query_one("#detail-status").update(f"  merge failed: {err}")
 
@@ -566,6 +526,7 @@ class LogsScreen(Screen):
     def __init__(self, session_id: str) -> None:
         super().__init__()
         self.session_id = session_id
+        self._offset = 0  # byte offset for follow mode
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
@@ -587,8 +548,10 @@ class LogsScreen(Screen):
         lp = log_path(self.session_id)
         if not lp.exists():
             log.write(f"(no log at {lp})", style="dim")
+            self._offset = 0
             return
         text = lp.read_text()
+        self._offset = len(text.encode())
         for line in text.splitlines():
             log.write(line)
 
@@ -604,15 +567,18 @@ class LogsScreen(Screen):
     def _poll_follow(self) -> None:
         if not self.follow:
             return
-        log = self.query_one("#full-log")
         lp = log_path(self.session_id)
         if not lp.exists():
             return
-        # ponytail: re-read whole file + clear — simple, not memory-efficient for huge logs
-        # upgrade path: track byte offset, only append new lines
-        text = lp.read_text()
-        log.clear()
-        for line in text.splitlines():
+        with lp.open("rb") as f:
+            f.seek(self._offset)
+            new_bytes = f.read()
+        if not new_bytes:
+            return
+        self._offset += len(new_bytes)
+        new_text = new_bytes.decode("utf-8", errors="replace")
+        log = self.query_one("#full-log")
+        for line in new_text.splitlines():
             log.write(line)
 
     def action_back(self) -> None:
@@ -635,28 +601,33 @@ class GoalDevinApp(App):
     def on_mount(self) -> None:
         self.push_screen(MainScreen())
 
+    def on_shutdown(self) -> None:
+        """Kill all running loops on quit."""
+        for loop in self.loops.values():
+            if loop.is_alive():
+                loop.kill()
+
     def get_loop(self, session_id: str) -> GoalLoop | None:
         return self.loops.get(session_id)
 
     def start_goal(self, goal: str, model: str, max_iters: int,
                    use_worktree: bool, use_sandbox: bool) -> None:
         """Start a new goal loop in a background thread."""
-        # generate a placeholder session id for worktree (real one comes after iter 0)
-        import uuid
-        temp_id = f"goal-{uuid.uuid4().hex[:8]}"
-
-        # create worktree first if requested
+        worktree_id = f"goal-{uuid.uuid4().hex[:8]}"
         cwd = os.getcwd()
+
         if use_worktree and is_git_repo(cwd):
-            wt_path, err = create_worktree(temp_id, cwd=cwd)
+            wt_path, err = create_worktree(worktree_id, cwd=cwd)
             if wt_path:
                 cwd = str(wt_path)
             else:
                 self.notify(f"worktree creation failed: {err}", severity="error")
                 use_worktree = False
+                worktree_id = None
+        else:
+            worktree_id = None
 
         def on_iter(iters, sid, output, elapsed):
-            # called from worker thread — update state via call_from_thread
             self.call_from_thread(self._on_iter, sid, iters, output, elapsed)
 
         def on_status(status, detail):
@@ -672,23 +643,61 @@ class GoalDevinApp(App):
             use_worktree=use_worktree,
             use_sandbox=use_sandbox,
             cwd=cwd,
+            worktree_id=worktree_id,
             on_iter=on_iter,
             on_status=on_status,
             on_done=on_done,
         )
         loop.start()
-        # we'll track by session_id after iter 0 completes; for now use temp
-        self.loops[temp_id] = loop
+        track_key = worktree_id or id(loop)
+        self.loops[track_key] = loop
+
+    def resume_goal(self, state: dict) -> None:
+        """Resume a stopped/killed goal from saved state."""
+        session_id = state.get("session_id")
+        goal = state.get("goal", "")
+        if not session_id or not goal:
+            self.bell()
+            return
+        cwd = state.get("cwd", os.getcwd())
+        worktree_id = state.get("worktree_id")
+        use_worktree = state.get("use_worktree", False)
+        use_sandbox = state.get("use_sandbox", False)
+
+        def on_iter(iters, sid, output, elapsed):
+            self.call_from_thread(self._on_iter, sid, iters, output, elapsed)
+
+        def on_status(status, detail):
+            self.call_from_thread(self._on_status, status, detail)
+
+        def on_done(reason, iters, elapsed):
+            self.call_from_thread(self._on_done, reason, iters, elapsed)
+
+        loop = GoalLoop(
+            goal=goal,
+            session_id=session_id,
+            model=state.get("model"),
+            permission_mode="autonomous" if use_sandbox else state.get("permission_mode"),
+            use_worktree=use_worktree,
+            use_sandbox=use_sandbox,
+            cwd=cwd,
+            worktree_id=worktree_id,
+            on_iter=on_iter,
+            on_status=on_status,
+            on_done=on_done,
+        )
+        loop.start()
+        self.loops[session_id] = loop
+        self.notify(f"resumed goal: {goal[:40]}", timeout=5)
 
     def _on_iter(self, sid, iters, output, elapsed):
-        # update tracking: temp_id -> real session_id
+        # remap temp tracking key to real session_id
         for key, loop in list(self.loops.items()):
             if loop.session_id == sid and key != sid:
                 self.loops[sid] = self.loops.pop(key)
                 break
 
     def _on_status(self, status, detail):
-        # could show a toast/notification
         pass
 
     def _on_done(self, reason, iters, elapsed):
@@ -701,7 +710,8 @@ class GoalDevinApp(App):
             msg = f"goal error at iter {iters}"
         else:
             msg = f"goal stopped: {reason}"
-        notify("goal-devin", msg)
+        # desktop notification only — no bell (would corrupt TUI)
+        notify_desktop("goal-devin", msg)
         self.notify(msg, timeout=10)
 
 
