@@ -81,7 +81,7 @@ goal-devin
 ### Main screen
 
 ```
-┌─ goal-devin v0.3.0 ─────────────────────────────────┐
+┌─ goal-devin v0.4.0 ─────────────────────────────────┐
 │  Active Goals (↑↓ navigate, Enter for details)      │
 │  ▸ ember-turnover  make tests pass       iter 14    │
 │    quiet-falcon    fix auth bug          iter 3     │
@@ -192,7 +192,7 @@ Three layers, strongest to weakest:
 
 ### 1. Devin sandbox (OS isolation, on by default)
 
-Uses Devin CLI's `--sandbox` flag — macOS seatbelt / Linux bwrap+seccomp. Restricts file writes to granted scopes, filters network by domain allow/deny lists. Forces `autonomous` permission mode.
+Uses Devin CLI's `--sandbox` flag — macOS seatbelt / Linux bwrap+seccomp. Restricts file writes to granted scopes, filters network by domain allow/deny lists. Works with any permission mode.
 
 ```bash
 goal-devin -- goal "..." --sandbox          # on (default)
@@ -242,7 +242,7 @@ $ goal-devin -- status --all
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--model` | `glm-5.2` | Devin model |
-| `--permission-mode` | `dangerous` | Permission mode (auto-overridden to `autonomous` if `--sandbox`) |
+| `--permission-mode` | `dangerous` | Permission mode |
 | `--sleep` | `2` | Seconds between iterations |
 | `--max-iters` | `0` | Stop after N iters (0 = forever) |
 | `--iter-timeout` | `1800` | Per-iteration timeout in seconds |
@@ -294,7 +294,7 @@ Any model the Devin CLI supports:
 | SWE 1.6 Fast | `swe-1.6-fast` | Cognition fast |
 | Adaptive | `adaptive` | Auto-router |
 
-Run `devin --help` to see the full list on your version. The TUI model picker has a refresh button that re-parses from `devin --help`.
+Run `devin --help` to see the full list on your version. The TUI model picker uses a hardcoded list.
 
 ## How it works
 
@@ -324,7 +324,7 @@ Each iteration's output is logged to `~/.goal-devin/logs/<session-id>.log`. Stat
 git clone https://github.com/kartikkabadi/goal-devin
 cd goal-devin
 uv sync
-uv run pytest              # run tests (52 tests)
+uv run pytest              # run tests (71 tests)
 uv run goal-devin          # run TUI locally
 ```
 
