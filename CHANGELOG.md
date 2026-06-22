@@ -5,6 +5,13 @@ All notable changes to goal-devin will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.1] - 2026-06-22
+
+### Fixed
+- Paused goals orphaned worktrees on quit: `on_shutdown` only cleaned worktrees for RUNNING/STARTING goals, missing PAUSED. A paused goal's loop is alive (thread blocked on pause_event) — `on_shutdown` kills it, but the worktree cleanup check skipped PAUSED status, leaving the worktree on disk. Added STATUS_PAUSED to the cleanup check.
+- Resume failed on killed worktree goals: when a worktree goal was killed, `_on_done` removed the worktree from disk, but the state file still pointed to the deleted worktree path as `cwd`. Resuming from CLI or TUI would try to `Popen(cwd=deleted_path)` → `FileNotFoundError`. Both `cmd_resume` (CLI) and `resume_goal` (TUI) now check if `cwd` exists on disk. If not, they fall back to `os.getcwd()`, set `use_worktree=False`, `worktree_id=None`, and warn the user.
+
+
 ## [0.4.0] - 2026-06-22
 
 ### Fixed

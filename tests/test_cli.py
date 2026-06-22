@@ -1,4 +1,5 @@
 """Tests for the hidden CLI — verifies resume passes session_id (the bug fix)."""
+import os
 import sys
 import tempfile
 import threading
@@ -90,9 +91,11 @@ class TestCmdResume(unittest.TestCase):
     @patch("goal_devin.cli._run_goal_loop")
     def test_resume_uses_worktree_id_from_state(self, mock_run):
         """resume must use the stored worktree_id, not create a new worktree."""
+        # use a real path so the cwd-exists check passes
+        real_cwd = tempfile.mkdtemp()
         state = {
             "session_id": "devin-sid-xyz",
-            "cwd": "/repo/.goal-wt/goal-abc123",
+            "cwd": real_cwd,
             "goal": "fix bug",
             "model": "glm-5.2",
             "permission_mode": "dangerous",
@@ -114,7 +117,37 @@ class TestCmdResume(unittest.TestCase):
             cli.cmd_resume(args)
         _, kwargs = mock_run.call_args
         self.assertEqual(kwargs.get("worktree_id"), "goal-abc123")
-        self.assertEqual(kwargs.get("cwd"), "/repo/.goal-wt/goal-abc123")
+        self.assertEqual(kwargs.get("cwd"), real_cwd)
+
+    @patch("goal_devin.cli._run_goal_loop")
+    def test_resume_falls_back_when_worktree_deleted(self, mock_run):
+        """resume must fall back to os.getcwd() when worktree path is gone."""
+        state = {
+            "session_id": "devin-sid-xyz",
+            "cwd": "/nonexistent/.goal-wt/goal-abc123",
+            "goal": "fix bug",
+            "model": "glm-5.2",
+            "permission_mode": "dangerous",
+            "use_worktree": True,
+            "use_sandbox": False,
+            "worktree_id": "goal-abc123",
+            "iters": 5,
+            "status": "killed",
+        }
+        args = MagicMock()
+        args.session_id = None
+        args.goal = None
+        args.model = None
+        args.permission_mode = None
+        args.sleep = None
+        args.max_iters = None
+        args.iter_timeout = None
+        with patch("goal_devin.cli.load_state", return_value=state):
+            cli.cmd_resume(args)
+        _, kwargs = mock_run.call_args
+        self.assertFalse(kwargs.get("use_worktree"))
+        self.assertIsNone(kwargs.get("worktree_id"))
+        self.assertEqual(kwargs.get("cwd"), os.getcwd())
 
 
 class TestCmdGoalNoWorktree(unittest.TestCase):

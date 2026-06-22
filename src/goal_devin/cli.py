@@ -181,6 +181,12 @@ def cmd_resume(args):
     use_worktree = state.get("use_worktree", False)
     use_sandbox = state.get("use_sandbox", False)
     permission_mode = args.permission_mode or state.get("permission_mode")
+    # worktree may have been removed (e.g., goal was killed) — fall back
+    if use_worktree and not Path(cwd).exists():
+        print(f"  {_c('warn', C.YELLOW)} worktree gone, running in {os.getcwd()}")
+        cwd = os.getcwd()
+        use_worktree = False
+        worktree_id = None
     return _run_goal_loop(
         goal=goal,
         session_id=session_id,

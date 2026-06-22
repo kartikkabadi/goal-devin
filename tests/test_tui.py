@@ -3,10 +3,11 @@
 Tests the full TUI flow: launch, start goal, see it appear, iter updates,
 kill, error display, startup recovery. Mocks GoalLoop to avoid real devin calls.
 """
+import os
 import pytest
 from unittest.mock import MagicMock, patch, call
 from goal_devin.tui import GoalDevinApp, GoalListItem
-from goal_devin.core import GoalState, STATUS_STARTING, STATUS_RUNNING, STATUS_STOPPED, STATUS_ERROR, STATUS_KILLED
+from goal_devin.core import GoalState, STATUS_STARTING, STATUS_RUNNING, STATUS_STOPPED, STATUS_ERROR, STATUS_KILLED, STATUS_PAUSED
 
 
 @pytest.fixture
@@ -327,3 +328,49 @@ async def test_shutdown_cleans_up_running_worktrees(app):
             assert any(c.args[0] == "goal-s2" for c in calls), "starting goal worktree not removed"
             # stopped goal worktree NOT removed
             assert not any(c.args[0] == "goal-s3" for c in calls), "stopped goal worktree should not be removed"
+
+
+async def test_shutdown_cleans_up_paused_worktrees(app):
+    """on_shutdown removes worktrees for paused goals — not just running/starting."""
+    async with app.run_test() as pilot:
+        gs_paused = GoalState(goal="g1", model="glm-5.2", session_id="sid1",
+                              status=STATUS_PAUSED, iters=3,
+                              use_worktree=True, worktree_id="goal-p1",
+                              cwd="/fake/repo")
+        app.goals["sid1"] = gs_paused
+
+        mock_loop = MagicMock()
+        mock_loop.is_alive.return_value = True
+        app.loops["sid1"] = mock_loop
+
+        with patch("goal_devin.tui.remove_worktree") as mock_remove:
+            mock_remove.return_value = (True, None)
+            app.on_shutdown()
+            await pilot.pause()
+
+            calls = mock_remove.call_args_list
+            assert any(c.args[0] == "goal-p1" for c in calls), \
+                "paused goal worktree not removed"
+
+
+async def test_resume_falls_back_when_worktree_deleted(app):
+    """resume_goal must fall back to os.getcwd() when worktree path is gone."""
+    async with app.run_test() as pilot:
+        state = {
+            "session_id": "devin-sid-xyz",
+            "cwd": "/nonexistent/.goal-wt/goal-abc123",
+            "goal": "fix bug",
+            "model": "glm-5.2",
+            "use_worktree": True,
+            "use_sandbox": False,
+            "worktree_id": "goal-abc123",
+            "iters": 5,
+        }
+        app.resume_goal(state)
+        await pilot.pause()
+
+        gs = app.goals.get("devin-sid-xyz")
+        assert gs is not None, "goal not registered"
+        assert gs.use_worktree is False, "use_worktree should be False after fallback"
+        assert gs.worktree_id is None, "worktree_id should be None after fallback"
+        assert gs.cwd == os.getcwd(), "cwd should fall back to os.getcwd()"

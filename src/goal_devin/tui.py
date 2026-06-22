@@ -658,9 +658,9 @@ class GoalDevinApp(App):
             if loop.is_alive():
                 loop.kill()
                 loop.join(timeout=2)
-        # remove worktrees for any goal that was still running/starting
+        # remove worktrees for any goal still running/starting/paused
         for gs in self.goals.values():
-            if gs.status in (core.STATUS_RUNNING, core.STATUS_STARTING):
+            if gs.status in (core.STATUS_RUNNING, core.STATUS_STARTING, core.STATUS_PAUSED):
                 if gs.use_worktree and gs.worktree_id:
                     remove_worktree(gs.worktree_id, cwd=gs.cwd, force=True)
 
@@ -749,6 +749,12 @@ class GoalDevinApp(App):
         worktree_id = state.get("worktree_id")
         use_worktree = state.get("use_worktree", False)
         use_sandbox = state.get("use_sandbox", False)
+        # worktree may have been removed (e.g., goal was killed) — fall back
+        if use_worktree and not Path(cwd).exists():
+            self.notify(f"worktree gone, running in {os.getcwd()}", severity="warning", timeout=10)
+            cwd = os.getcwd()
+            use_worktree = False
+            worktree_id = None
 
         # Update in-memory state
         gs = GoalState(
