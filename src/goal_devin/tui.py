@@ -144,7 +144,6 @@ class MainScreen(Screen):
         Binding("s", "toggle_status", "status"),
         Binding("l", "logs", "logs"),
         Binding("a", "advanced", "advanced"),
-        Binding("q", "quit", "quit"),
         Binding("enter", "detail", "detail"),
     ]
 
@@ -178,7 +177,7 @@ class MainScreen(Screen):
         if not states:
             lv.append(ListItem(Label("  no goals — press n to start one",
                                      classes="dim-text")))
-        if prev_index is not None and prev_index < len(lv._items):
+        if prev_index is not None and prev_index < len(lv):
             lv.index = prev_index
         if self.show_status:
             self._render_status_panel(states)
@@ -219,11 +218,13 @@ class MainScreen(Screen):
 
     def _selected_state(self) -> dict | None:
         lv = self.query_one(ListView)
-        if lv.index is None or not lv._items:
+        items = lv.query("ListItem")
+        if lv.index is None or not items:
             return None
-        item = lv._items[lv.index]
-        if isinstance(item, GoalListItem):
-            return item.state
+        if lv.index < len(items):
+            item = items[lv.index]
+            if isinstance(item, GoalListItem):
+                return item.state
         return None
 
     def action_resume_goal(self) -> None:
