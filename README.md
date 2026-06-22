@@ -15,7 +15,7 @@ Unbounded goal-loop wrapper around the [Devin CLI](https://devin.ai). Set a goal
     │  │ ▸ ember-turnover  make tests pass  iter 14  │
     │  │   quiet-falcon    fix auth bug    iter 3    │
     │  │                                              │
-    │  │ [n] new  [r] resume  [s] status  [a] adv    │
+    │  │ [n] new  [r] resume  [l] logs             │
     │  └──────────────────────────────────────────────┘
     │
     │  iter 0:  devin -p --model glm-5.2 "GOAL: ..."
@@ -81,13 +81,12 @@ goal-devin
 ### Main screen
 
 ```
-┌─ goal-devin v0.4.1 ─────────────────────────────────┐
+┌─ goal-devin v0.5.0 ─────────────────────────────────┐
 │  Active Goals (↑↓ navigate, Enter for details)      │
 │  ▸ ember-turnover  make tests pass       iter 14    │
 │    quiet-falcon    fix auth bug          iter 3     │
 │                                                      │
-│  [n] new  [r] resume  [s] status  [l] logs          │
-│  [a] advanced                                        │
+│  [n] new  [r] resume  [l] logs  [Enter] detail      │
 └──────────────────────────────────────────────────────┘
 ```
 
@@ -124,30 +123,13 @@ goal-devin
 └──────────────────────────────────────────────────────┘
 ```
 
-### Advanced screen
-
-```
-┌─ Advanced ───────────────────────────────────────────┐
-│  [m] model info           show default model         │
-│  [p] permission info      show permission mode       │
-│  [w] worktree list        list goal-devin worktrees  │
-│  [t] iter timeout         show per-iter timeout      │
-│  [s] sleep between iters  show sleep interval        │
-│  [k] kill session         how to kill a goal         │
-│  [e] export session       how to export a session    │
-│  [d] delete state         how to delete state files  │
-└──────────────────────────────────────────────────────┘
-```
-
 ### Key bindings
 
 | Key | Action |
 |-----|--------|
 | `n` | new goal |
 | `r` | resume selected |
-| `s` | toggle status panel |
 | `l` | logs for selected |
-| `a` | advanced menu |
 | `↑↓` | navigate goal list |
 | `Enter` | open goal detail |
 | `Esc` | back / cancel |

@@ -80,7 +80,6 @@ class GoalState:
     status: str = STATUS_STARTING
     iters: int = 0
     elapsed: float = 0.0
-    last_output: str = ""
     started_at: str = ""
     cwd: str = ""
     worktree_id: str | None = None

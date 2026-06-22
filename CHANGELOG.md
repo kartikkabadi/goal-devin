@@ -5,6 +5,22 @@ All notable changes to goal-devin will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.0] - 2026-06-22
+
+### Deleted (Elon Musk Algorithm)
+- AdvancedScreen: 75-line screen with 9 menu items that just printed "set via GOAL_DEVIN_X env". None of them did anything — it was a help screen disguised as a menu. README already documents env vars. Deleted the screen, its binding, its action, and the `_menu_item` helper.
+- Status panel toggle (`s` key): table view of the same data the goal list already shows. Second view of the same data. Deleted `show_status` reactive, `_render_status_panel`, `action_toggle_status`, and the status-panel widget from MainScreen.
+- `last_output` field on GoalState: stored in `_on_iter` on every iteration, never displayed anywhere. PRD spec'd it, PRD is closed, detail screen shows 20-line log tail instead. Deleted the field, the assignment, and the test assertion.
+- Unused imports: `Table` from rich, `list_worktrees` from worktree, `advanced-list`/`advanced-item` CSS classes.
+
+### Fixed
+- Iters reset to 0 on resume when cwd doesn't match state file: `GoalLoop._run` loaded state via `load_state(self.cwd)`, but when a worktree was deleted and cwd fell back to `os.getcwd()`, the state file for the new cwd had a different session_id. The iters count reset to 0, causing `max_iters` goals to run more iterations than expected. Fixed: `GoalLoop._run` now falls back to `find_state_by_session_id` when `load_state` returns a mismatched session, preserving the correct iters count.
+
+### Security
+- Path traversal in `log_path`: user-supplied session IDs containing `/`, `\`, or `..` could traverse outside the log directory. Added validation that rejects session IDs with path separators or traversal sequences.
+- Flag injection in `merge_worktree`: `target_branch` starting with `-` could be interpreted as a git flag. Added validation that rejects branch names starting with `-`.
+
+
 ## [0.4.1] - 2026-06-22
 
 ### Fixed

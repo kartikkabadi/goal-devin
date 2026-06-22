@@ -4,7 +4,6 @@ Screens:
   - MainScreen: goal list + normal menu
   - NewGoalScreen: prompt + model picker + worktree/sandbox toggles
   - GoalDetailScreen: selected goal info + log tail + actions
-  - AdvancedScreen: advanced controls
   - LogsScreen: full log viewer + follow mode
 """
 from __future__ import annotations
@@ -26,14 +25,13 @@ from textual.widgets import (
     Select, Checkbox, RichLog, Static, TextArea,
 )
 from rich.panel import Panel
-from rich.table import Table
 
 from . import core
 from .core import (
     GoalLoop, GoalState, all_states, fmt_elapsed,
     read_log_tail, log_path, MODELS, DEFAULTS, notify_desktop,
 )
-from .worktree import is_git_repo, create_worktree, merge_worktree, list_worktrees, remove_worktree
+from .worktree import is_git_repo, create_worktree, merge_worktree, remove_worktree
 
 
 CSS = """
@@ -98,16 +96,6 @@ Screen {
     padding: 0 1;
 }
 
-.advanced-list {
-    padding: 1 2;
-}
-
-.advanced-item {
-    padding: 0 1;
-    height: 3;
-    border-bottom: $boost;
-}
-
 .error-text {
     color: $error;
     text-style: bold;
@@ -141,13 +129,9 @@ class MainScreen(Screen):
     BINDINGS = [
         Binding("n", "new_goal", "new"),
         Binding("r", "resume_goal", "resume"),
-        Binding("s", "toggle_status", "status"),
         Binding("l", "logs", "logs"),
-        Binding("a", "advanced", "advanced"),
         Binding("enter", "detail", "detail"),
     ]
-
-    show_status = reactive(False)
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
@@ -157,7 +141,6 @@ class MainScreen(Screen):
             Static("  Active Goals (↑↓ navigate, Enter for details)",
                    classes="dim-text"),
             ListView(classes="goal-list"),
-            Static("", id="status-panel", classes="dim-text"),
             classes="main-container",
         )
         yield Footer()
@@ -195,38 +178,6 @@ class MainScreen(Screen):
                                      classes="dim-text")))
         if prev_index is not None and prev_index < len(lv):
             lv.index = prev_index
-        if self.show_status:
-            self._render_status_panel(goals)
-
-    def _render_status_panel(self, goals) -> None:
-        panel = self.query_one("#status-panel")
-        if not goals:
-            panel.update("  no goal states found.")
-            return
-        table = Table(show_header=True, header_style="bold", box=None)
-        table.add_column("session", style="cyan")
-        table.add_column("iters", justify="right")
-        table.add_column("elapsed")
-        table.add_column("model", style="magenta")
-        table.add_column("status")
-        table.add_column("goal")
-        for gs in goals:
-            goal = gs.goal or "?"
-            if len(goal) > 30:
-                goal = goal[:27] + "..."
-            table.add_row(
-                gs.session_id or "starting...",
-                str(gs.iters),
-                fmt_elapsed(gs.elapsed) if gs.elapsed else "0s",
-                gs.model or "?",
-                gs.status,
-                goal,
-            )
-        panel.update(table)
-
-    def action_toggle_status(self) -> None:
-        self.show_status = not self.show_status
-        self.refresh_goals()
 
     def action_new_goal(self) -> None:
         self.app.push_screen(NewGoalScreen())
@@ -262,9 +213,6 @@ class MainScreen(Screen):
         gs = self._selected_goal()
         if gs and gs.session_id and not gs.session_id.startswith("tmp-"):
             self.app.push_screen(LogsScreen(gs.session_id))
-
-    def action_advanced(self) -> None:
-        self.app.push_screen(AdvancedScreen())
 
     def action_detail(self) -> None:
         gs = self._selected_goal()
@@ -462,83 +410,6 @@ class GoalDetailScreen(Screen):
 
     def action_back(self) -> None:
         self.app.pop_screen()
-
-
-class AdvancedScreen(Screen):
-    """Advanced controls menu."""
-
-    BINDINGS = [
-        Binding("escape", "back", "back"),
-        Binding("m", "model", "model"),
-        Binding("p", "permission", "permission"),
-        Binding("w", "worktree", "worktree"),
-        Binding("t", "timeout", "timeout"),
-        Binding("s", "sleep", "sleep"),
-        Binding("k", "kill", "kill"),
-        Binding("e", "export", "export"),
-        Binding("d", "delete", "delete"),
-    ]
-
-    def compose(self) -> ComposeResult:
-        yield Header(show_clock=True)
-        yield VerticalScroll(
-            Static("Advanced", classes="title-bar"),
-            self._menu_item("m", "model picker", "change default model"),
-            self._menu_item("p", "permission mode", "dangerous / auto"),
-            self._menu_item("w", "worktree mgmt", "list / create / remove / merge worktrees"),
-            self._menu_item("t", "iter timeout", f"per-iter timeout ({DEFAULTS['iter_timeout']}s)"),
-            self._menu_item("s", "sleep between iters", f"seconds ({DEFAULTS['sleep_secs']}s)"),
-            self._menu_item("k", "kill session", "stop a running goal by session id"),
-            self._menu_item("e", "export session", "export conversation to file"),
-            self._menu_item("d", "delete state", "remove a goal's state file"),
-            Static("", id="advanced-status", classes="status-line"),
-            classes="advanced-list",
-        )
-        yield Footer()
-
-    def _menu_item(self, key: str, label: str, desc: str) -> Static:
-        return Static(f"  [{key}]  {label:<22} {desc}", classes="advanced-item")
-
-    def action_back(self) -> None:
-        self.app.pop_screen()
-
-    def action_model(self) -> None:
-        self.query_one("#advanced-status").update(
-            f"  default model: {DEFAULTS['model']} (set via GOAL_DEVIN_MODEL env)")
-
-    def action_permission(self) -> None:
-        self.query_one("#advanced-status").update(
-            f"  permission mode: {DEFAULTS['permission_mode']} (set via GOAL_DEVIN_PERMISSION_MODE env)")
-
-    def action_worktree(self) -> None:
-        wts = list_worktrees()
-        if not wts:
-            self.query_one("#advanced-status").update("  no worktrees found")
-            return
-        lines = ["  worktrees:"]
-        for w in wts:
-            lines.append(f"    {w.get('branch', '?')}  {w.get('path', '?')}")
-        self.query_one("#advanced-status").update("\n".join(lines))
-
-    def action_timeout(self) -> None:
-        self.query_one("#advanced-status").update(
-            f"  iter timeout: {DEFAULTS['iter_timeout']}s (set via GOAL_DEVIN_ITER_TIMEOUT env)")
-
-    def action_sleep(self) -> None:
-        self.query_one("#advanced-status").update(
-            f"  sleep: {DEFAULTS['sleep_secs']}s (set via GOAL_DEVIN_SLEEP env)")
-
-    def action_kill(self) -> None:
-        self.query_one("#advanced-status").update(
-            "  press k on a goal detail screen to kill it")
-
-    def action_export(self) -> None:
-        self.query_one("#advanced-status").update(
-            "  use `devin --export -- -r <session-id>` to export a session")
-
-    def action_delete(self) -> None:
-        self.query_one("#advanced-status").update(
-            "  delete state files manually in ~/.goal-devin/states/")
 
 
 class LogsScreen(Screen):
@@ -815,7 +686,6 @@ class GoalDevinApp(App):
             gs.status = core.STATUS_RUNNING
             gs.iters = iters
             gs.elapsed = elapsed
-            gs.last_output = output.strip().split("\n")[-1] if output else ""
         self._refresh_main_screen()
 
     def _on_status(self, track_key, status, detail):

@@ -53,7 +53,7 @@ async def test_goal_appears_in_registry_immediately(app):
 
 
 async def test_iter_updates_goal_state(app):
-    """When _on_iter fires, the GoalState updates with iters and last_output."""
+    """When _on_iter fires, the GoalState updates with iters and elapsed."""
     async with app.run_test() as pilot:
         track_key = "tmp-abc"
         gs = GoalState(goal="test", model="glm-5.2", session_id=track_key,
@@ -70,7 +70,6 @@ async def test_iter_updates_goal_state(app):
         gs = app.goals["real-sid"]
         assert gs.status == STATUS_RUNNING
         assert gs.iters == 1
-        assert gs.last_output == "last line"
         assert gs.elapsed == 5.0
         # key_holder should be updated so on_done/on_status use the new key
         assert key_holder[0] == "real-sid"
