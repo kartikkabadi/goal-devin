@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import os
 import uuid
+from datetime import datetime
 from pathlib import Path
 
 from textual.app import App, ComposeResult
@@ -27,7 +28,7 @@ from rich.table import Table
 
 from . import core
 from .core import (
-    GoalLoop, all_states, load_state, fmt_elapsed,
+    GoalLoop, GoalState, all_states, fmt_elapsed,
     read_log_tail, log_path, MODELS, DEFAULTS, notify_desktop,
 )
 from .worktree import is_git_repo, create_worktree, merge_worktree
@@ -118,21 +119,20 @@ Screen {
 
 
 class GoalListItem(ListItem):
-    """A goal entry in the main list."""
+    """A goal entry in the main list — reads from GoalState."""
 
-    def __init__(self, state: dict) -> None:
-        self.state = state
-        sid = state.get("session_id", "?")
-        goal = state.get("goal", "?")
+    def __init__(self, gs: GoalState) -> None:
+        self.gs = gs
+        sid = gs.session_id or "starting..."
+        goal = gs.goal or "?"
         if len(goal) > 50:
             goal = goal[:47] + "..."
-        iters = state.get("iters", 0)
-        model = state.get("model", "?")
-        status = state.get("status", "?")
-        cwd = state.get("cwd", "?")
-        cwd_short = cwd.replace(str(Path.home()), "~")
-        label = f"  {sid:<18} {goal:<50} iter {iters:<4} {model:<12} [{status}]"
-        super().__init__(Label(label))
+        iters = gs.iters
+        model = gs.model or "?"
+        status = gs.status
+        elapsed = fmt_elapsed(gs.elapsed) if gs.elapsed else "0s"
+        last = gs.last_output[:60] if gs.last_output else ""
+        super().__init__(Label(f"  {sid:<20} {goal:<50} iter {iters}  {elapsed}  [{status}]", classes="goal-item"))
 
 
 class MainScreen(Screen):
@@ -164,47 +164,64 @@ class MainScreen(Screen):
 
     def on_mount(self) -> None:
         self.refresh_goals()
-        self.set_interval(2.0, self.refresh_goals)
+        # 1s timer to update elapsed time for running goals
+        self.set_interval(1.0, self._tick_elapsed)
+
+    def _tick_elapsed(self) -> None:
+        """Update elapsed time for running goals and refresh the list."""
+        import time as _time
+        now = _time.time()
+        changed = False
+        for gs in self.app.goals.values():
+            if gs.status == core.STATUS_RUNNING and gs.started_at:
+                try:
+                    from datetime import datetime
+                    started = datetime.fromisoformat(gs.started_at).timestamp()
+                    gs.elapsed = now - started
+                    changed = True
+                except (ValueError, OSError):
+                    pass
+        if changed:
+            self.refresh_goals()
 
     def refresh_goals(self) -> None:
-        """Refresh the goal list from state files, preserving selection."""
+        """Refresh the goal list from in-memory registry, preserving selection."""
         lv = self.query_one(ListView)
         prev_index = lv.index
-        states = list(all_states())
+        goals = list(self.app.goals.values())
         lv.clear()
-        for state in states:
-            lv.append(GoalListItem(state))
-        if not states:
+        for gs in goals:
+            lv.append(GoalListItem(gs))
+        if not goals:
             lv.append(ListItem(Label("  no goals — press n to start one",
                                      classes="dim-text")))
         if prev_index is not None and prev_index < len(lv):
             lv.index = prev_index
         if self.show_status:
-            self._render_status_panel(states)
+            self._render_status_panel(goals)
 
-    def _render_status_panel(self, states) -> None:
+    def _render_status_panel(self, goals) -> None:
         panel = self.query_one("#status-panel")
-        if not states:
+        if not goals:
             panel.update("  no goal states found.")
             return
         table = Table(show_header=True, header_style="bold", box=None)
         table.add_column("session", style="cyan")
-        table.add_column("cwd", style="blue")
         table.add_column("iters", justify="right")
+        table.add_column("elapsed")
         table.add_column("model", style="magenta")
         table.add_column("status")
         table.add_column("goal")
-        for s in states:
-            cwd = s.get("cwd", "?").replace(str(Path.home()), "~")
-            goal = s.get("goal", "?")
+        for gs in goals:
+            goal = gs.goal or "?"
             if len(goal) > 30:
                 goal = goal[:27] + "..."
             table.add_row(
-                s.get("session_id", "?"),
-                cwd,
-                str(s.get("iters", 0)),
-                s.get("model", "?"),
-                s.get("status", "?"),
+                gs.session_id or "starting...",
+                str(gs.iters),
+                fmt_elapsed(gs.elapsed) if gs.elapsed else "0s",
+                gs.model or "?",
+                gs.status,
                 goal,
             )
         panel.update(table)
@@ -216,7 +233,7 @@ class MainScreen(Screen):
     def action_new_goal(self) -> None:
         self.app.push_screen(NewGoalScreen())
 
-    def _selected_state(self) -> dict | None:
+    def _selected_goal(self) -> GoalState | None:
         lv = self.query_one(ListView)
         items = lv.query("ListItem")
         if lv.index is None or not items:
@@ -224,41 +241,43 @@ class MainScreen(Screen):
         if lv.index < len(items):
             item = items[lv.index]
             if isinstance(item, GoalListItem):
-                return item.state
+                return item.gs
         return None
 
     def action_resume_goal(self) -> None:
         """Actually resume a stopped/killed goal's loop."""
-        state = self._selected_state()
-        if not state:
+        gs = self._selected_goal()
+        if not gs:
             self.app.bell()
             return
-        sid = state.get("session_id")
-        if not sid:
+        sid = gs.session_id
+        if not sid or sid.startswith("tmp-"):
             self.app.bell()
             return
         if self.app.get_loop(sid):
-            self.app.push_screen(GoalDetailScreen(sid, state))
+            self.app.push_screen(GoalDetailScreen(sid, gs))
             return
-        self.app.resume_goal(state)
+        # Convert GoalState to dict for resume_goal
+        from dataclasses import asdict
+        self.app.resume_goal(asdict(gs))
 
     def action_logs(self) -> None:
-        state = self._selected_state()
-        if state:
-            self.app.push_screen(LogsScreen(state.get("session_id", "")))
+        gs = self._selected_goal()
+        if gs and gs.session_id and not gs.session_id.startswith("tmp-"):
+            self.app.push_screen(LogsScreen(gs.session_id))
 
     def action_advanced(self) -> None:
         self.app.push_screen(AdvancedScreen())
 
     def action_detail(self) -> None:
-        state = self._selected_state()
-        if state:
-            self.app.push_screen(GoalDetailScreen(state.get("session_id", ""), state))
+        gs = self._selected_goal()
+        if gs:
+            self.app.push_screen(GoalDetailScreen(gs.session_id or "", gs))
 
     def on_list_view_selected(self, event: ListView.Selected) -> None:
         if isinstance(event.item, GoalListItem):
-            sid = event.item.state.get("session_id")
-            self.app.push_screen(GoalDetailScreen(sid, event.item.state))
+            gs = event.item.gs
+            self.app.push_screen(GoalDetailScreen(gs.session_id or "", gs))
 
 
 class NewGoalScreen(Screen):
@@ -345,15 +364,15 @@ class GoalDetailScreen(Screen):
         Binding("escape", "back", "back"),
     ]
 
-    def __init__(self, session_id: str, state: dict) -> None:
+    def __init__(self, session_id: str, gs: GoalState) -> None:
         super().__init__()
         self.session_id = session_id
-        self.state = state
+        self.gs = gs
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
         yield Vertical(
-            Static(f"Goal: {self.session_id}", classes="title-bar"),
+            Static(f"Goal: {self.session_id or 'starting...'}", classes="title-bar"),
             VerticalScroll(
                 Static(self._render_info(), id="detail-info"),
                 Static("  Log tail (last 20 lines):", classes="form-label"),
@@ -367,39 +386,45 @@ class GoalDetailScreen(Screen):
 
     def on_mount(self) -> None:
         self._refresh()
-        self.set_interval(2.0, self._refresh)
+        self.set_interval(1.0, self._refresh)
 
     def _render_info(self) -> Panel:
-        s = self.state
-        cwd = s.get("cwd", "?").replace(str(Path.home()), "~")
+        gs = self.gs
+        cwd = (gs.cwd or "?").replace(str(Path.home()), "~")
+        elapsed = fmt_elapsed(gs.elapsed) if gs.elapsed else "0s"
         info = (
-            f"  goal:     {s.get('goal', '?')}\n"
-            f"  session:  {s.get('session_id', '?')}\n"
-            f"  model:    {s.get('model', '?')}\n"
-            f"  iters:    {s.get('iters', 0)}\n"
-            f"  status:   {s.get('status', '?')}\n"
+            f"  goal:     {gs.goal or '?'}\n"
+            f"  session:  {gs.session_id or 'starting...'}\n"
+            f"  model:    {gs.model or '?'}\n"
+            f"  iters:    {gs.iters}\n"
+            f"  elapsed:  {elapsed}\n"
+            f"  status:   {gs.status}\n"
             f"  cwd:      {cwd}\n"
-            f"  worktree: {'yes' if s.get('use_worktree') else 'no'}\n"
-            f"  sandbox:  {'yes' if s.get('use_sandbox') else 'no'}\n"
-            f"\n"
-            f"  [p] pause/resume  [k] kill  [L] full logs  [m] merge worktree  [Esc] back"
+            f"  worktree: {'yes' if gs.use_worktree else 'no'}\n"
+            f"  sandbox:  {'yes' if gs.use_sandbox else 'no'}\n"
         )
-        return Panel(info, title=self.session_id, border_style="cyan")
+        if gs.error:
+            info += f"  error:    {gs.error}\n"
+        info += "\n  [p] pause/resume  [k] kill  [L] full logs  [m] merge worktree  [Esc] back"
+        return Panel(info, title=self.session_id or "starting...", border_style="cyan")
 
     def _refresh(self) -> None:
-        """Refresh info panel + log tail from current state."""
-        fresh = load_state(cwd=self.state.get("cwd"))
-        if fresh and fresh.get("session_id") == self.session_id:
-            self.state = fresh
+        """Refresh from in-memory registry."""
+        fresh = self.app.get_goal(self.session_id)
+        if fresh:
+            self.gs = fresh
         self.query_one("#detail-info").update(self._render_info())
         log = self.query_one("#detail-log")
         log.clear()
-        tail = read_log_tail(self.session_id, lines=20)
-        if tail:
-            for line in tail.splitlines():
-                log.write(line)
+        if self.session_id:
+            tail = read_log_tail(self.session_id, lines=20)
+            if tail:
+                for line in tail.splitlines():
+                    log.write(line)
+            else:
+                log.write("(no logs yet)", style="dim")
         else:
-            log.write("(no logs yet)", style="dim")
+            log.write("(waiting for session to start...)", style="dim")
 
     def action_pause_resume(self) -> None:
         loop = self.app.get_loop(self.session_id)
@@ -424,14 +449,15 @@ class GoalDetailScreen(Screen):
                 f"  no running loop for {self.session_id}")
 
     def action_full_logs(self) -> None:
-        self.app.push_screen(LogsScreen(self.session_id))
+        if self.session_id:
+            self.app.push_screen(LogsScreen(self.session_id))
 
     def action_merge(self) -> None:
-        if not self.state.get("use_worktree"):
+        if not self.gs.use_worktree:
             self.query_one("#detail-status").update("  no worktree for this goal")
             return
-        wt_id = self.state.get("worktree_id") or self.session_id
-        ok, err = merge_worktree(wt_id, cwd=self.state.get("cwd"))
+        wt_id = self.gs.worktree_id or self.session_id
+        ok, err = merge_worktree(wt_id, cwd=self.gs.cwd)
         if ok:
             self.query_one("#detail-status").update(f"  merged {wt_id}")
         else:
@@ -601,9 +627,28 @@ class GoalDevinApp(App):
 
     def __init__(self) -> None:
         super().__init__()
-        self.loops: dict[str, GoalLoop] = {}  # session_id -> GoalLoop
+        self.goals: dict[str, GoalState] = {}  # session_id -> GoalState
+        self.loops: dict[str, GoalLoop] = {}   # session_id -> GoalLoop
 
     def on_mount(self) -> None:
+        # Load existing state files into registry on startup
+        for state in all_states():
+            sid = state.get("session_id", "")
+            if not sid:
+                continue
+            gs = GoalState(
+                goal=state.get("goal", ""),
+                model=state.get("model", ""),
+                session_id=sid,
+                status=core.STATUS_STOPPED,  # previous session, not running
+                iters=state.get("iters", 0),
+                started_at=state.get("started_at", ""),
+                cwd=state.get("cwd", ""),
+                worktree_id=state.get("worktree_id"),
+                use_worktree=state.get("use_worktree", False),
+                use_sandbox=state.get("use_sandbox", False),
+            )
+            self.goals[sid] = gs
         self.push_screen(MainScreen())
 
     def on_shutdown(self) -> None:
@@ -614,6 +659,15 @@ class GoalDevinApp(App):
 
     def get_loop(self, session_id: str) -> GoalLoop | None:
         return self.loops.get(session_id)
+
+    def get_goal(self, session_id: str) -> GoalState | None:
+        return self.goals.get(session_id)
+
+    def _refresh_main_screen(self):
+        """Trigger MainScreen to re-read the goals registry."""
+        screen = self.screen
+        if hasattr(screen, "refresh_goals"):
+            screen.refresh_goals()
 
     def start_goal(self, goal: str, model: str, max_iters: int,
                    use_worktree: bool, use_sandbox: bool) -> None:
@@ -632,14 +686,31 @@ class GoalDevinApp(App):
         else:
             worktree_id = None
 
+        # Create in-memory state immediately — shows in list before iter 0
+        track_key = worktree_id or f"tmp-{uuid.uuid4().hex[:8]}"
+        gs = GoalState(
+            goal=goal,
+            model=model,
+            session_id=track_key,  # placeholder until real session_id
+            status=core.STATUS_STARTING,
+            started_at=datetime.now().isoformat(timespec="seconds"),
+            cwd=cwd,
+            worktree_id=worktree_id,
+            use_worktree=use_worktree,
+            use_sandbox=use_sandbox,
+        )
+        self.goals[track_key] = gs
+        self._refresh_main_screen()
+        self.notify(f"started goal: {goal[:40]}", timeout=5)
+
         def on_iter(iters, sid, output, elapsed):
-            self.call_from_thread(self._on_iter, sid, iters, output, elapsed)
+            self.call_from_thread(self._on_iter, track_key, sid, iters, output, elapsed)
 
         def on_status(status, detail):
-            self.call_from_thread(self._on_status, status, detail)
+            self.call_from_thread(self._on_status, track_key, status, detail)
 
         def on_done(reason, iters, elapsed):
-            self.call_from_thread(self._on_done, reason, iters, elapsed)
+            self.call_from_thread(self._on_done, track_key, reason, iters, elapsed)
 
         loop = GoalLoop(
             goal=goal,
@@ -654,9 +725,7 @@ class GoalDevinApp(App):
             on_done=on_done,
         )
         loop.start()
-        track_key = worktree_id or id(loop)
         self.loops[track_key] = loop
-        self.notify(f"started goal: {goal[:40]}", timeout=5)
 
     def resume_goal(self, state: dict) -> None:
         """Resume a stopped/killed goal from saved state."""
@@ -670,14 +739,31 @@ class GoalDevinApp(App):
         use_worktree = state.get("use_worktree", False)
         use_sandbox = state.get("use_sandbox", False)
 
+        # Update in-memory state
+        gs = GoalState(
+            goal=goal,
+            model=state.get("model", ""),
+            session_id=session_id,
+            status=core.STATUS_STARTING,
+            iters=state.get("iters", 0),
+            started_at=state.get("started_at", ""),
+            cwd=cwd,
+            worktree_id=worktree_id,
+            use_worktree=use_worktree,
+            use_sandbox=use_sandbox,
+        )
+        self.goals[session_id] = gs
+        self._refresh_main_screen()
+        self.notify(f"resumed goal: {goal[:40]}", timeout=5)
+
         def on_iter(iters, sid, output, elapsed):
-            self.call_from_thread(self._on_iter, sid, iters, output, elapsed)
+            self.call_from_thread(self._on_iter, session_id, sid, iters, output, elapsed)
 
         def on_status(status, detail):
-            self.call_from_thread(self._on_status, status, detail)
+            self.call_from_thread(self._on_status, session_id, status, detail)
 
         def on_done(reason, iters, elapsed):
-            self.call_from_thread(self._on_done, reason, iters, elapsed)
+            self.call_from_thread(self._on_done, session_id, reason, iters, elapsed)
 
         loop = GoalLoop(
             goal=goal,
@@ -694,21 +780,48 @@ class GoalDevinApp(App):
         )
         loop.start()
         self.loops[session_id] = loop
-        self.notify(f"resumed goal: {goal[:40]}", timeout=5)
 
-    def _on_iter(self, sid, iters, output, elapsed):
-        # remap temp tracking key to real session_id
-        for key, loop in list(self.loops.items()):
-            if loop.session_id == sid and key != sid:
-                self.loops[sid] = self.loops.pop(key)
-                break
+    def _on_iter(self, track_key, sid, iters, output, elapsed):
+        """Update GoalState on each iteration."""
+        gs = self.goals.get(track_key)
+        if gs:
+            # Remap temp key to real session_id on first iter
+            if track_key != sid:
+                self.goals[sid] = self.goals.pop(track_key)
+                gs = self.goals[sid]
+                # Also remap loops dict
+                if track_key in self.loops:
+                    self.loops[sid] = self.loops.pop(track_key)
+            gs.session_id = sid
+            gs.status = core.STATUS_RUNNING
+            gs.iters = iters
+            gs.elapsed = elapsed
+            gs.last_output = output.strip().split("\n")[-1] if output else ""
+        self._refresh_main_screen()
 
-    def _on_status(self, status, detail):
-        if status == core.STATUS_ERROR:
-            self.notify(f"error: {detail}", severity="error", timeout=10)
+    def _on_status(self, track_key, status, detail):
+        """Update GoalState on status change."""
+        gs = self.goals.get(track_key)
+        if gs:
+            gs.status = status
+            if status == core.STATUS_ERROR:
+                gs.error = detail
+                self.notify(f"error: {detail}", severity="error", timeout=10)
+        self._refresh_main_screen()
 
-    def _on_done(self, reason, iters, elapsed):
+    def _on_done(self, track_key, reason, iters, elapsed):
+        """Update GoalState on completion."""
+        gs = self.goals.get(track_key)
         elapsed_str = fmt_elapsed(elapsed)
+        if gs:
+            gs.iters = iters
+            gs.elapsed = elapsed
+            if reason == "killed":
+                gs.status = core.STATUS_KILLED
+            elif reason == "error":
+                gs.status = core.STATUS_ERROR
+            else:
+                gs.status = core.STATUS_STOPPED
         if reason == "max_iters":
             msg = f"goal done — {iters} iters in {elapsed_str}"
         elif reason == "killed":
@@ -717,9 +830,9 @@ class GoalDevinApp(App):
             msg = f"goal error at iter {iters}"
         else:
             msg = f"goal stopped: {reason}"
-        # desktop notification only — no bell (would corrupt TUI)
         notify_desktop("goal-devin", msg)
         self.notify(msg, timeout=10)
+        self._refresh_main_screen()
 
 
 def run_tui():

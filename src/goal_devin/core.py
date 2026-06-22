@@ -4,6 +4,7 @@ UI-agnostic. Both the TUI and the hidden CLI call this module.
 """
 import hashlib
 import json
+from dataclasses import dataclass, field
 import os
 import platform
 import re
@@ -68,6 +69,25 @@ STATUS_PAUSED = "paused"
 STATUS_STOPPED = "stopped"      # stopped by user (Ctrl+C or max_iters)
 STATUS_KILLED = "killed"        # killed, cannot resume
 STATUS_ERROR = "error"          # devin failed on iter 0
+STATUS_STARTING = "starting"    # created but iter 0 not yet complete
+
+
+@dataclass
+class GoalState:
+    """In-memory state for a single goal. Source of truth for the TUI while running."""
+    goal: str
+    model: str = ""
+    session_id: str = ""
+    status: str = STATUS_STARTING
+    iters: int = 0
+    elapsed: float = 0.0
+    last_output: str = ""
+    started_at: str = ""
+    cwd: str = ""
+    worktree_id: str | None = None
+    use_worktree: bool = False
+    use_sandbox: bool = False
+    error: str = ""
 
 
 # --- state management ---
