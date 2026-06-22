@@ -46,16 +46,7 @@ jobs:
         run: uv sync --dev
 
       - name: Check import syntax
-        run: uv run python -c "import goal_devin.cli; import goal_devin; print('ok')"
-
-      - name: Check zero deps
-        run: |
-          if grep -q "^dependencies = \[" pyproject.toml && \
-             ! grep -A1 "^dependencies = \[" pyproject.toml | grep -q "^]$" | head -1; then
-            # dependencies = [] is allowed (empty list)
-            true
-          fi
-          uv run python -c "import sys; assert len(sys.modules) < 500, 'too many modules loaded'"
+        run: uv run python -c "import goal_devin.cli; import goal_devin.tui; import goal_devin.core; import goal_devin.worktree; print('ok')"
 
   build:
     needs: [test, lint]

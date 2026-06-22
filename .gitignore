@@ -36,3 +36,4 @@ htmlcov/
 
 # goal-devin local state (never commit)
 .goal-devin/
+.goal-wt/
