@@ -56,7 +56,7 @@ jobs:
         run: sfw uv sync --dev
 
       - name: Check import syntax
-        run: uv run python -c "import goal_devin.cli; import goal_devin.tui; import goal_devin.core; import goal_devin.worktree; print('ok')"
+        run: uv run python -c "import goal_devin.cli; import goal_devin.core; import goal_devin.worktree; print('ok')"
 
   build:
     needs: [test, lint]

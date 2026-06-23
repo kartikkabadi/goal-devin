@@ -13,8 +13,8 @@ uv run pytest
 
 ## Rules
 
-- **Minimal dependencies.** `textual` is the only dep (for the TUI). Stdlib for everything else. If you need another dep, it doesn't belong here.
-- **Module structure.** `core.py` (state + GoalLoop), `tui.py` (Textual TUI), `cli.py` (hidden CLI), `worktree.py` (git worktrees). Don't add modules unless there's a real reason.
+- **Minimal dependencies.** Zero runtime deps. Stdlib for everything. If you need another dep, it doesn't belong here.
+- **Module structure.** `core.py` (state + GoalLoop), `cli.py` (CLI), `worktree.py` (git worktrees). Don't add modules unless there's a real reason.
 - **Ponytail.** Shortest working diff wins. No speculative abstractions, no boilerplate "for later", no config for values that never change.
 - **Surgical edits.** Touch only what you must. Match existing style. Don't refactor things that aren't broken.
 
@@ -35,7 +35,7 @@ uv run pytest -v           # verbose
 uv run pytest tests/test_core.py   # just core tests
 ```
 
-TUI tests use `pytest-asyncio` + Textual's `run_test()` pilot. Core and CLI tests use stdlib `unittest`.
+Core and CLI tests use stdlib `unittest`.
 
 ## Style
 

@@ -12,8 +12,8 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 from goal_devin import core
 from goal_devin.core import (
     fmt_elapsed, state_file_for, load_state, save_state, all_states,
-    read_log_tail, log_path, GoalLoop, MODELS, latest_session_id,
-    STATUS_RUNNING, STATUS_PAUSED, STATUS_KILLED,
+    log_path, GoalLoop, latest_session_id,
+    STATUS_RUNNING, STATUS_KILLED,
 )
 
 
@@ -76,7 +76,7 @@ class TestStatePerCwd(unittest.TestCase):
         self.assertFalse(state_file_for(cwd="/test").with_suffix(".json.tmp").exists())
 
 
-class TestReadLogTail(unittest.TestCase):
+class TestLogPath(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp()
         core.LOG_DIR = Path(self.tmp) / "logs"
@@ -85,14 +85,6 @@ class TestReadLogTail(unittest.TestCase):
     def tearDown(self):
         import shutil
         shutil.rmtree(self.tmp, ignore_errors=True)
-
-    def test_empty_log(self):
-        self.assertEqual(read_log_tail("nonexistent"), "")
-
-    def test_tail(self):
-        from goal_devin.core import append_log
-        append_log("test-sid", "line1\nline2\nline3\n")
-        self.assertEqual(read_log_tail("test-sid", lines=2), "line2\nline3")
 
     def test_log_path_rejects_traversal(self):
         """log_path must reject session_ids containing path traversal chars."""
@@ -109,15 +101,33 @@ class TestReadLogTail(unittest.TestCase):
         self.assertTrue(str(p).endswith("devin-sid-abc123.log"))
 
 
-class TestModels(unittest.TestCase):
-    def test_models_not_empty(self):
-        self.assertGreater(len(MODELS), 10)
+class TestWorktreeCleanup(unittest.TestCase):
+    """GoalLoop._finish removes worktree on kill only."""
 
-    def test_glm_in_models(self):
-        self.assertIn("glm-5.2", MODELS)
+    @patch("goal_devin.core.remove_worktree")
+    def test_kill_removes_worktree(self, mock_remove):
+        mock_remove.return_value = (True, None)
+        loop = GoalLoop(goal="t", use_worktree=True, worktree_id="goal-abc", cwd="/fake")
+        loop._finish("killed", 3, 15.0)
+        mock_remove.assert_called_once_with("goal-abc", cwd="/fake", force=True)
 
-    def test_kimi_in_models(self):
-        self.assertIn("kimi-k2.7", MODELS)
+    @patch("goal_devin.core.remove_worktree")
+    def test_kill_without_worktree_no_remove(self, mock_remove):
+        loop = GoalLoop(goal="t", use_worktree=False, worktree_id=None, cwd="/fake")
+        loop._finish("killed", 3, 15.0)
+        mock_remove.assert_not_called()
+
+    @patch("goal_devin.core.remove_worktree")
+    def test_max_iters_keeps_worktree(self, mock_remove):
+        loop = GoalLoop(goal="t", use_worktree=True, worktree_id="goal-abc", cwd="/fake")
+        loop._finish("max_iters", 10, 60.0)
+        mock_remove.assert_not_called()
+
+    @patch("goal_devin.core.remove_worktree")
+    def test_error_keeps_worktree(self, mock_remove):
+        loop = GoalLoop(goal="t", use_worktree=True, worktree_id="goal-abc", cwd="/fake")
+        loop._finish("error", 0, 0)
+        mock_remove.assert_not_called()
 
 
 class TestLatestSessionId(unittest.TestCase):
@@ -180,17 +190,6 @@ class TestGoalLoop(unittest.TestCase):
     def tearDown(self):
         import shutil
         shutil.rmtree(self.tmp, ignore_errors=True)
-
-    def test_pause_sets_event(self):
-        loop = GoalLoop(goal="test", cwd="/fake")
-        loop.pause()
-        self.assertTrue(loop.pause_event.is_set())
-
-    def test_resume_clears_event(self):
-        loop = GoalLoop(goal="test", cwd="/fake")
-        loop.pause()
-        loop.resume()
-        self.assertFalse(loop.pause_event.is_set())
 
     def test_kill_sets_event(self):
         loop = GoalLoop(goal="test", cwd="/fake")
@@ -269,7 +268,7 @@ class TestGoalLoop(unittest.TestCase):
 
 
 class TestNotifySplit(unittest.TestCase):
-    """notify_desktop and notify_bell are separate — bell must not fire in TUI."""
+    """notify_desktop and notify_bell are separate — bell can be suppressed."""
 
     @patch("goal_devin.core.notify_bell")
     @patch("goal_devin.core.notify_desktop")

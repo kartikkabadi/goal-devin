@@ -1,13 +1,13 @@
 [project]
 name = "goal-devin"
-version = "0.5.0"
+version = "0.6.0"
 description = "Unbounded goal-loop wrapper around the Devin CLI — burn free GLM 5.2 / Kimi K 2.7 tokens toward a fixed goal"
 readme = "README.md"
 authors = [{ name = "Kartik Kabadi", email = "1kartikkabadi1@gmail.com" }]
 license = "MIT"
 requires-python = ">=3.11"
-dependencies = ["textual>=0.80"]
-keywords = ["devin", "cli", "tui", "agent", "loop", "goal", "glm", "kimi", "automation", "coding-agent"]
+dependencies = []
+keywords = ["devin", "cli", "agent", "loop", "goal", "glm", "kimi", "automation", "coding-agent"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Environment :: Console",
@@ -37,8 +37,4 @@ build-backend = "uv_build"
 [dependency-groups]
 dev = [
     "pytest>=8",
-    "pytest-asyncio>=1.4.0",
 ]
-
-[tool.pytest.ini_options]
-asyncio_mode = "auto"

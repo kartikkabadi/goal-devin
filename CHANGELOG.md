@@ -5,6 +5,23 @@ All notable changes to goal-devin will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+## [0.6.0] - 2026-06-23
+
+### Deleted
+- `GoalLoop.pause()` / `.resume()` and `pause_event` — TUI-only; CLI uses Ctrl+C kill + `resume` subcommand.
+- `MODELS`, `read_log_tail`, `STATUS_STARTING` — TUI-era dead code with no CLI consumer.
+- TUI removed entirely: `src/goal_devin/tui.py` (743 lines) and `tests/test_tui.py` (375 lines). The Textual TUI crashed repeatedly in real use; the CLI is now the sole interface. `goal-devin` with no args prints help. Subcommands are top-level (`goal-devin goal "..."`); the old `goal-devin -- goal "..."` form is deprecated but argparse still accepts `--`.
+- `textual>=0.80` runtime dependency removed (plus 10 transitive deps: rich, markdown-it-py, etc.). `pytest-asyncio` dev dependency removed (only used by TUI tests). The package now has zero runtime dependencies.
+- `tui` keyword removed from pyproject.toml.
+
+### Fixed
+- Worktree cleanup on kill moved into `GoalLoop._finish` (was CLI-only callback).
+- Restored `-V` / `--version` on root parser.
+- `goal-devin help` prints help again.
+- README documents manual `git merge` for worktree goals after successful stop.
+
 ## [0.5.0] - 2026-06-22
 
 ### Deleted (Elon Musk Algorithm)

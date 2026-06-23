@@ -3,20 +3,11 @@
 [![CI](https://github.com/kartikkabadi/goal-devin/actions/workflows/ci.yml/badge.svg)](https://github.com/kartikkabadi/goal-devin/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
-[![Textual TUI](https://img.shields.io/badge/TUI-textual-8A2BE2.svg)](https://textual.textualize.io/)
 
 Unbounded goal-loop wrapper around the [Devin CLI](https://devin.ai). Set a goal, walk away, come back to progress. Burns free GLM 5.2 / Kimi K 2.7 tokens (or any Devin model) toward a fixed goal until you stop it.
 
 ```text
-  goal-devin
-    │
-    │  ┌─ TUI ──────────────────────────────────────┐
-    │  │ Active Goals                                │
-    │  │ ▸ ember-turnover  make tests pass  iter 14  │
-    │  │   quiet-falcon    fix auth bug    iter 3    │
-    │  │                                              │
-    │  │ [n] new  [r] resume  [l] logs             │
-    │  └──────────────────────────────────────────────┘
+  goal-devin goal "make all tests pass"
     │
     │  iter 0:  devin -p --model glm-5.2 "GOAL: ..."
     │  iter 1:  devin -r <id> -p "Continue..."
@@ -32,26 +23,23 @@ GLM 5.2 and Kimi K 2.7 are free on Devin. This tool exists to burn those free to
 
 ## Features
 
-- **TUI** — Textual-based terminal UI with arrow-key navigation, model picker, toggles
 - **Goal loop** — burns tokens toward a fixed goal until you stop it (model can't self-exit)
 - **git worktrees** — each goal runs on an isolated branch (on by default)
 - **Devin sandbox** — OS-level isolation via `devin --sandbox` (on by default)
-- **Pause / kill** — pause a goal, resume later, or kill it
+- **Resume** — stop a goal, resume it later in the same session
 - **Multiple goals** — run goals in different directories simultaneously
 - **Notifications** — desktop notification when a goal stops
-- **Hidden CLI** — scriptable mode for cron/CI: `goal-devin -- goal "..."`
+- **Scriptable** — plain CLI, works in cron/CI
 
 ## Quick start
 
 ```bash
 # Install
-uvx --from git+https://github.com/kartikkabadi/goal-devin goal-devin
+uvx --from git+https://github.com/kartikkabadi/goal-devin goal-devin goal "make tests pass"
 
 # Or pip
 pip install git+https://github.com/kartikkabadi/goal-devin
-
-# Launch TUI
-goal-devin
+goal-devin goal "make tests pass"
 ```
 
 ## Install
@@ -60,7 +48,7 @@ goal-devin
 
 ```bash
 # Option 1: uvx (no install, runs from git)
-uvx --from git+https://github.com/kartikkabadi/goal-devin goal-devin
+uvx --from git+https://github.com/kartikkabadi/goal-devin goal-devin goal "..."
 
 # Option 2: pip
 pip install git+https://github.com/kartikkabadi/goal-devin
@@ -69,103 +57,35 @@ pip install git+https://github.com/kartikkabadi/goal-devin
 git clone https://github.com/kartikkabadi/goal-devin
 cd goal-devin
 uv sync
-uv run goal-devin
+uv run goal-devin goal "..."
 ```
 
-## TUI mode (default)
-
-```bash
-goal-devin
-```
-
-### Main screen
-
-```
-┌─ goal-devin v0.5.0 ─────────────────────────────────┐
-│  Active Goals (↑↓ navigate, Enter for details)      │
-│  ▸ ember-turnover  make tests pass       iter 14    │
-│    quiet-falcon    fix auth bug          iter 3     │
-│                                                      │
-│  [n] new  [r] resume  [l] logs  [Enter] detail      │
-└──────────────────────────────────────────────────────┘
-```
-
-### New goal screen
-
-```
-┌─ New Goal (ctrl+s to start, Esc to cancel) ─────────┐
-│  Goal prompt:                                        │
-│  ┌────────────────────────────────────────────────┐  │
-│  │ make all tests pass                            │  │
-│  └────────────────────────────────────────────────┘  │
-│  Model:        [glm-5.2        ↑↓]                   │
-│  Max iters:    [0]  (0 = forever)                    │
-│  [✓] git worktree (branch isolation)                 │
-│  [✓] devin sandbox (OS isolation)                    │
-│  [Tab] next  [ctrl+s] start  [Esc] cancel            │
-└──────────────────────────────────────────────────────┘
-```
-
-### Goal detail screen
-
-```
-┌─ ember-turnover ────────────────────────────────────┐
-│  goal:     make all tests pass                       │
-│  session:  ember-turnover    model: glm-5.2          │
-│  iters:    14                status: running         │
-│  worktree: yes              sandbox: yes             │
-│                                                      │
-│  Log tail:                                           │
-│  iter 13 | fixed test_foo.py                         │
-│  iter 14 | all tests passing                         │
-│                                                      │
-│  [p] pause/resume  [k] kill  [L] logs  [m] merge    │
-└──────────────────────────────────────────────────────┘
-```
-
-### Key bindings
-
-| Key | Action |
-|-----|--------|
-| `n` | new goal |
-| `r` | resume selected |
-| `l` | logs for selected |
-| `↑↓` | navigate goal list |
-| `Enter` | open goal detail |
-| `Esc` | back / cancel |
-| `Tab` | next field in forms |
-| `ctrl+s` | start goal (in new goal form) |
-| `p` | pause/resume (in detail) |
-| `k` | kill (in detail) |
-| `m` | merge worktree (in detail) |
-| `f` | follow logs (in logs screen) |
-
-## Hidden CLI mode (for scripts)
+## Usage
 
 ```bash
 # Start a goal (blocking, Ctrl+C to stop)
-goal-devin -- goal "make all tests pass"
+goal-devin goal "make all tests pass"
 
 # With options
-goal-devin -- goal "refactor auth" --model kimi-k2.7 --max-iters 10
+goal-devin goal "refactor auth" --model kimi-k2.7 --max-iters 10
 
 # No worktree, no sandbox
-goal-devin -- goal "..." --no-worktree --no-sandbox
+goal-devin goal "..." --no-worktree --no-sandbox
 
 # Resume
-goal-devin -- resume
-goal-devin -- resume quiet-falcon
+goal-devin resume
+goal-devin resume quiet-falcon
 
 # Status
-goal-devin -- status          # this directory
-goal-devin -- status --all    # all directories
+goal-devin status          # this directory
+goal-devin status --all    # all directories
 
 # Logs
-goal-devin -- logs
-goal-devin -- logs -f         # follow
+goal-devin logs
+goal-devin logs -f         # follow
 
 # Version
-goal-devin -- version
+goal-devin version
 ```
 
 ## Sandboxing
@@ -177,17 +97,17 @@ Three layers, strongest to weakest:
 Uses Devin CLI's `--sandbox` flag — macOS seatbelt / Linux bwrap+seccomp. Restricts file writes to granted scopes, filters network by domain allow/deny lists. Works with any permission mode.
 
 ```bash
-goal-devin -- goal "..." --sandbox          # on (default)
-goal-devin -- goal "..." --no-sandbox       # off
+goal-devin goal "..." --sandbox          # on (default)
+goal-devin goal "..." --no-sandbox       # off
 ```
 
 ### 2. git worktrees (branch isolation, on by default)
 
-Each goal runs in `<repo-root>/.goal-wt/<session-id>/` on branch `goal-devin/<session-id>`. The model's changes don't touch your working branch. On stop, merge back or discard.
+Each goal runs in `<repo-root>/.goal-wt/<worktree-id>/` on branch `goal-devin/<worktree-id>`. The model's changes don't touch your working branch. After a successful stop, merge from repo root: `git merge goal-devin/<worktree-id>`. Ctrl+C kill auto-removes the worktree.
 
 ```bash
-goal-devin -- goal "..." --worktree         # on (default)
-goal-devin -- goal "..." --no-worktree      # off
+goal-devin goal "..." --worktree         # on (default)
+goal-devin goal "..." --no-worktree      # off
 ```
 
 ### 3. Docker (coming later)
@@ -201,15 +121,15 @@ State is keyed by directory. Run goals in different folders simultaneously:
 ```bash
 # terminal 1
 cd ~/projects/app
-goal-devin
+goal-devin goal "make tests pass"
 
 # terminal 2
 cd ~/projects/api
-goal-devin
+goal-devin goal "fix the auth bug"
 ```
 
 ```bash
-$ goal-devin -- status --all
+$ goal-devin status --all
   [~/projects/app]
     session ember-turnover  iters 14  model glm-5.2  status running
     goal make all tests pass
@@ -219,7 +139,7 @@ $ goal-devin -- status --all
     goal fix the auth bug
 ```
 
-## Flags (hidden CLI)
+## Flags
 
 | Flag | Default | Description |
 |------|---------|-------------|
@@ -237,7 +157,7 @@ $ goal-devin -- status --all
 GOAL_DEVIN_MODEL=kimi-k2.7 \
 GOAL_DEVIN_MAX_ITERS=50 \
 GOAL_DEVIN_WORKTREE=0 \
-goal-devin -- goal "..."
+goal-devin goal "..."
 ```
 
 | Env var | Default |
@@ -276,13 +196,13 @@ Any model the Devin CLI supports:
 | SWE 1.6 Fast | `swe-1.6-fast` | Cognition fast |
 | Adaptive | `adaptive` | Auto-router |
 
-Run `devin --help` to see the full list on your version. The TUI model picker uses a hardcoded list.
+Run `devin --help` to see the full list on your version.
 
 ## How it works
 
 1. **Iter 0:** calls `devin -p --model glm-5.2 "GOAL: ..."` — starts a fresh session, model does work, exits. Wrapper grabs the session id from `devin list --format json`.
 2. **Iter N>0:** calls `devin -r <session-id> -p "Continue toward the goal..."` — resumes the same session, model keeps context, does more work, exits.
-3. **Loop:** repeats until Ctrl+C, `--max-iters`, kill, or pause. The model cannot stop the loop — only you stop it.
+3. **Loop:** repeats until Ctrl+C or `--max-iters`. The model cannot stop the loop — only you stop it.
 
 Each iteration's output is logged to `~/.goal-devin/logs/<session-id>.log`. State (session id, goal, iter count, model, status) is saved per-directory so you can resume later.
 
@@ -298,7 +218,7 @@ Each iteration's output is logged to `~/.goal-devin/logs/<session-id>.log`. Stat
 
 - Python 3.11+
 - [Devin CLI](https://devin.ai) installed and authenticated
-- Dependencies: `textual>=0.80` (for TUI)
+- No runtime dependencies
 
 ## Development
 
@@ -306,8 +226,8 @@ Each iteration's output is logged to `~/.goal-devin/logs/<session-id>.log`. Stat
 git clone https://github.com/kartikkabadi/goal-devin
 cd goal-devin
 uv sync
-uv run pytest              # run tests (78 tests)
-uv run goal-devin          # run TUI locally
+uv run pytest              # run tests
+uv run goal-devin goal "..."  # run locally
 ```
 
 ## License
@@ -317,5 +237,4 @@ uv run goal-devin          # run TUI locally
 ## See also
 
 - [Devin CLI docs](https://developers.devin.ai/cli)
-- [Textual](https://textual.textualize.io/) — TUI framework
 - [Loop engineering](https://addyosmani.com/blog/loop-engineering/) — the pattern this tool automates

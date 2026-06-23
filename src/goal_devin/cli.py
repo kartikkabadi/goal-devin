@@ -1,15 +1,12 @@
-"""Hidden CLI for goal-devin (scriptable mode).
-
-The primary interface is the TUI (goal-devin with no args). This CLI is kept
-for scripts/cron/CI: `goal-devin -- goal "..."` or subcommands.
+"""CLI for goal-devin.
 
 Usage:
-  goal-devin                          # launch TUI (default)
-  goal-devin -- goal "make tests pass"  # hidden CLI: start goal
-  goal-devin -- resume [session-id]    # hidden CLI: resume
-  goal-devin -- status [--all]         # hidden CLI: status
-  goal-devin -- logs [session-id] [-f] # hidden CLI: logs
-  goal-devin -- version                # hidden CLI: version
+  goal-devin goal "make tests pass"
+  goal-devin goal "..." --model kimi-k2.7 --max-iters 10
+  goal-devin resume [session-id]
+  goal-devin status [--all]
+  goal-devin logs [session-id] [-f]
+  goal-devin version
 """
 import argparse
 import json
@@ -25,7 +22,7 @@ from .core import (
     GoalLoop, load_state, all_states, find_state_by_session_id, log_path,
     fmt_elapsed, DEFAULTS, notify,
 )
-from .worktree import is_git_repo, create_worktree, remove_worktree
+from .worktree import is_git_repo, create_worktree
 
 
 # --- ANSI colors (stdlib) ---
@@ -68,12 +65,6 @@ def _run_goal_loop(goal, session_id=None, model=None, permission_mode=None,
         result["reason"] = reason
         result["iters"] = iters
         result["elapsed"] = elapsed
-        # ponytail: remove worktree on kill — user discarded the work.
-        # max_iters/error keep worktree so user can merge/debug.
-        if reason == "killed" and use_worktree and worktree_id:
-            ok, err = remove_worktree(worktree_id, cwd=cwd, force=True)
-            if not ok:
-                print(f"  {_c('warn', C.YELLOW)} worktree cleanup failed: {err}", file=sys.stderr)
         done_event.set()
 
     def on_status(status, detail):
@@ -270,23 +261,23 @@ def build_parser():
     p = argparse.ArgumentParser(
         prog="goal-devin",
         description="Unbounded goal-loop wrapper around the Devin CLI. "
-                    "Run with no args for TUI, or use subcommands for scripts.",
+                    "Burn free GLM 5.2 / Kimi K 2.7 tokens toward a fixed goal.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""\
-TUI mode (default):
-  goal-devin                          # launch interactive TUI
-
-hidden CLI mode (for scripts):
-  goal-devin -- goal "make tests pass"
-  goal-devin -- goal "..." --model kimi-k2.7 --max-iters 10
-  goal-devin -- resume
-  goal-devin -- status --all
-  goal-devin -- logs -f
+Examples:
+  goal-devin goal "make all tests pass"
+  goal-devin goal "refactor auth" --model kimi-k2.7 --max-iters 10
+  goal-devin goal "..." --no-worktree --no-sandbox
+  goal-devin resume
+  goal-devin status --all
+  goal-devin logs -f
 
 stop:  Ctrl+C (or --max-iters N)
 state: ~/.goal-devin/
 """,
     )
+    p.add_argument("-V", "--version", action="version",
+                   version=f"%(prog)s {core.__version__}")
     common = argparse.ArgumentParser(add_help=False)
     common.add_argument("--model", default=None, help=f"Devin model (default: {DEFAULTS['model']})")
     common.add_argument("--permission-mode", default=None,
@@ -332,23 +323,20 @@ state: ~/.goal-devin/
 
 
 def main(argv=None):
-    """Entry point. No args → TUI. Subcommands → hidden CLI."""
+    """Entry point. No args → print help."""
+    parser = build_parser()
     if argv is None:
         argv = sys.argv[1:]
     if not argv:
-        from .tui import run_tui
-        run_tui()
+        parser.print_help()
         return 0
-    if argv in (["--help"], ["-h"], ["help"]):
-        build_parser().print_help()
+    if argv in (["help"],):
+        parser.print_help()
         return 0
-    if argv in (["version"], ["--version"], ["-V"]):
-        print(f"goal-devin {core.__version__}")
-        return 0
-    args = build_parser().parse_args(argv)
+    args = parser.parse_args(argv)
     core.ensure_dirs()
     if not getattr(args, "func", None):
-        build_parser().print_help()
+        parser.print_help()
         return 1
     return args.func(args)
 

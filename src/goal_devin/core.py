@@ -1,10 +1,9 @@
 """Core logic for goal-devin: state, devin subprocess, goal loop.
 
-UI-agnostic. Both the TUI and the hidden CLI call this module.
+UI-agnostic. The CLI calls this module.
 """
 import hashlib
 import json
-from dataclasses import dataclass
 import os
 import platform
 import shutil
@@ -16,6 +15,8 @@ from datetime import datetime
 from pathlib import Path
 
 from . import __version__
+
+from .worktree import remove_worktree
 
 # --- paths ---
 STATE_DIR = Path.home() / ".goal-devin"
@@ -32,19 +33,6 @@ DEFAULTS = {
     "use_worktree": os.environ.get("GOAL_DEVIN_WORKTREE", "1") not in ("0", "false", ""),
     "use_sandbox": os.environ.get("GOAL_DEVIN_SANDBOX", "1") not in ("0", "false", ""),
 }
-
-# --- models (hardcoded list for TUI select) ---
-MODELS = [
-    "glm-5.2", "glm-5.1",
-    "kimi-k2.7", "kimi-k2.6",
-    "gpt-5.5", "gpt-5.4", "gpt-5.4-mini", "gpt-5.3-codex", "gpt-5.2",
-    "claude-opus-4.8", "claude-opus-4.7", "claude-opus-4.6", "claude-opus-4.5",
-    "claude-sonnet-4.6", "claude-sonnet-4.5", "claude-haiku-4.5",
-    "gemini-3.5-flash", "gemini-3.1-pro", "gemini-3-flash",
-    "deepseek-v4-pro",
-    "swe-1.6-fast", "swe-1.6", "swe-1.5",
-    "adaptive",
-]
 
 # --- prompts ---
 INITIAL_PROMPT = """\
@@ -68,24 +56,6 @@ STATUS_PAUSED = "paused"
 STATUS_STOPPED = "stopped"      # stopped by user (Ctrl+C or max_iters)
 STATUS_KILLED = "killed"        # killed, cannot resume
 STATUS_ERROR = "error"          # devin failed on iter 0
-STATUS_STARTING = "starting"    # created but iter 0 not yet complete
-
-
-@dataclass
-class GoalState:
-    """In-memory state for a single goal. Source of truth for the TUI while running."""
-    goal: str
-    model: str = ""
-    session_id: str = ""
-    status: str = STATUS_STARTING
-    iters: int = 0
-    elapsed: float = 0.0
-    started_at: str = ""
-    cwd: str = ""
-    worktree_id: str | None = None
-    use_worktree: bool = False
-    use_sandbox: bool = False
-    error: str = ""
 
 
 # --- state management ---
@@ -143,15 +113,6 @@ def append_log(session_id, text):
         f.write(text)
         if not text.endswith("\n"):
             f.write("\n")
-
-
-def read_log_tail(session_id, lines=20):
-    """Return last N lines of a session's log, or empty string."""
-    lp = log_path(session_id)
-    if not lp.exists():
-        return ""
-    text = lp.read_text()
-    return "\n".join(text.splitlines()[-lines:])
 
 
 # --- devin subprocess ---
@@ -214,10 +175,9 @@ def fmt_elapsed(seconds):
 
 # --- goal loop ---
 class GoalLoop:
-    """Runs a goal loop in a background thread. Pause/kill via events.
+    """Runs a goal loop in a background thread.
 
-    Call .start() to launch, .pause()/.resume() to pause, .kill() to stop.
-    Subscribe to events via on_iter callback.
+    Call .start() to launch, .kill() to stop. Subscribe via on_iter callback.
     """
 
     def __init__(self, goal, session_id=None, model=None, permission_mode=None,
@@ -243,7 +203,6 @@ class GoalLoop:
         self.on_status = on_status    # callback(status, detail)
         self.on_done = on_done        # callback(reason, iters, elapsed)
 
-        self.pause_event = threading.Event()
         self.kill_event = threading.Event()
         self._thread = None
         self._proc = None             # current devin subprocess
@@ -257,19 +216,8 @@ class GoalLoop:
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
 
-    def pause(self):
-        self.pause_event.set()
-        if self.on_status:
-            self.on_status(STATUS_PAUSED, f"paused at iter {self.iters}")
-
-    def resume(self):
-        self.pause_event.clear()
-        if self.on_status:
-            self.on_status(STATUS_RUNNING, f"resumed at iter {self.iters}")
-
     def kill(self):
         self.kill_event.set()
-        self.pause_event.clear()  # unpause so it can exit
         with self._proc_lock:
             if self._proc and self._proc.poll() is None:
                 self._proc.terminate()
@@ -282,6 +230,15 @@ class GoalLoop:
     def join(self, timeout=None):
         if self._thread:
             self._thread.join(timeout)
+
+    def _finish(self, reason, iters, elapsed):
+        # ponytail: kill drops worktree; max_iters/error keep it for merge/debug
+        if reason == "killed" and self.use_worktree and self.worktree_id:
+            ok, err = remove_worktree(self.worktree_id, cwd=self.cwd, force=True)
+            if not ok and self.on_status:
+                self.on_status(STATUS_ERROR, f"worktree cleanup failed: {err}")
+        if self.on_done:
+            self.on_done(reason, iters, elapsed)
 
     def _run_devin(self, args):
         """Run devin, tracking the subprocess so kill() can terminate it."""
@@ -321,14 +278,14 @@ class GoalLoop:
                     if self.on_status:
                         self.on_status(STATUS_ERROR, f"devin exited {r.returncode} on iter 0")
                     if self.on_done:
-                        self.on_done("error", 0, 0)
+                        self._finish("error", 0, 0)
                     return
                 self.session_id = latest_session_id(self.cwd)
                 if not self.session_id:
                     if self.on_status:
                         self.on_status(STATUS_ERROR, "could not resolve session id")
                     if self.on_done:
-                        self.on_done("error", 0, 0)
+                        self._finish("error", 0, 0)
                     return
                 save_state({
                     "session_id": self.session_id,
@@ -360,7 +317,7 @@ class GoalLoop:
                     if self.on_status:
                         self.on_status(STATUS_ERROR, "no goal recorded")
                     if self.on_done:
-                        self.on_done("error", 0, 0)
+                        self._finish("error", 0, 0)
                     return
                 if self.on_status:
                     self.on_status(STATUS_RUNNING, f"resumed at iter {self.iters}")
@@ -370,20 +327,12 @@ class GoalLoop:
                 if self.kill_event.is_set():
                     self._update_state(STATUS_KILLED)
                     if self.on_done:
-                        self.on_done("killed", self.iters, time.monotonic() - self.start_time)
+                        self._finish("killed", self.iters, time.monotonic() - self.start_time)
                     return
                 if self.max_iters > 0 and self.iters >= self.max_iters:
                     self._update_state(STATUS_STOPPED)
                     if self.on_done:
-                        self.on_done("max_iters", self.iters, time.monotonic() - self.start_time)
-                    return
-                # wait while paused
-                while self.pause_event.is_set() and not self.kill_event.is_set():
-                    time.sleep(0.5)
-                if self.kill_event.is_set():
-                    self._update_state(STATUS_KILLED)
-                    if self.on_done:
-                        self.on_done("killed", self.iters, time.monotonic() - self.start_time)
+                        self._finish("max_iters", self.iters, time.monotonic() - self.start_time)
                     return
                 time.sleep(self.sleep_secs)
                 elapsed = time.monotonic() - self.start_time
@@ -405,12 +354,12 @@ class GoalLoop:
             if self.on_status:
                 self.on_status(STATUS_ERROR, "devin binary not found")
             if self.on_done:
-                self.on_done("error", self.iters, time.monotonic() - self.start_time)
+                self._finish("error", self.iters, time.monotonic() - self.start_time)
         except Exception as e:
             if self.on_status:
                 self.on_status(STATUS_ERROR, str(e))
             if self.on_done:
-                self.on_done("error", self.iters, time.monotonic() - self.start_time)
+                self._finish("error", self.iters, time.monotonic() - self.start_time)
 
     def _update_state(self, status):
         state = load_state(self.cwd) or {}
@@ -455,13 +404,13 @@ def notify_desktop(title, message):
 
 
 def notify_bell():
-    """Terminal bell — only safe in raw CLI mode, not inside a TUI."""
+    """Terminal bell."""
     sys.stdout.write("\a")
     sys.stdout.flush()
 
 
 def notify(title, message, bell=True):
-    """Desktop notification + optional terminal bell. Bell is suppressed in TUI mode."""
+    """Desktop notification + optional terminal bell."""
     notify_desktop(title, message)
     if bell:
         notify_bell()
