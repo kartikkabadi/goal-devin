@@ -14,7 +14,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-from . import __version__
+from . import __version__ as __version__  # re-export: cli/tests use core.__version__
 
 from .worktree import remove_worktree
 

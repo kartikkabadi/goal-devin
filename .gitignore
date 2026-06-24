@@ -21,6 +21,7 @@ uv.lock
 # IDE
 .vscode/
 .idea/
+.cursor/
 *.swp
 *.swo
 *~

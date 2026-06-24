@@ -312,10 +312,10 @@ state: ~/.goal-devin/
     s.add_argument("--all", action="store_true", help="Show all goals.")
     s.set_defaults(func=cmd_status)
 
-    l = sub.add_parser("logs", help="Print logs.")
-    l.add_argument("session_id", nargs="?", default=None, help="Session id.")
-    l.add_argument("-f", "--follow", action="store_true", help="Follow log.")
-    l.set_defaults(func=cmd_logs)
+    lp = sub.add_parser("logs", help="Print logs.")
+    lp.add_argument("session_id", nargs="?", default=None, help="Session id.")
+    lp.add_argument("-f", "--follow", action="store_true", help="Follow log.")
+    lp.set_defaults(func=cmd_logs)
 
     v = sub.add_parser("version", help="Print version.")
     v.set_defaults(func=cmd_version)

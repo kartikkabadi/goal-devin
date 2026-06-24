@@ -13,7 +13,6 @@ from goal_devin import core
 from goal_devin.core import (
     fmt_elapsed, state_file_for, load_state, save_state, all_states,
     log_path, GoalLoop, latest_session_id,
-    STATUS_RUNNING, STATUS_KILLED,
 )
 
 
