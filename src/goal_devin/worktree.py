@@ -3,6 +3,7 @@
 Each goal can run in an isolated git worktree on branch goal-devin/<session-id>,
 so the model's changes don't touch the user's working branch.
 """
+
 import subprocess
 from pathlib import Path
 
@@ -15,7 +16,9 @@ def is_git_repo(cwd=None):
     try:
         r = subprocess.run(
             ["git", "rev-parse", "--is-inside-work-tree"],
-            capture_output=True, text=True, cwd=cwd or ".",
+            capture_output=True,
+            text=True,
+            cwd=cwd or ".",
         )
         return r.returncode == 0 and r.stdout.strip() == "true"
     except FileNotFoundError:
@@ -31,7 +34,9 @@ def repo_root(cwd=None):
     try:
         r = subprocess.run(
             ["git", "rev-parse", "--show-toplevel"],
-            capture_output=True, text=True, cwd=cwd or ".",
+            capture_output=True,
+            text=True,
+            cwd=cwd or ".",
         )
         if r.returncode == 0:
             return Path(r.stdout.strip())
@@ -49,7 +54,9 @@ def main_repo_root(cwd=None):
     try:
         r = subprocess.run(
             ["git", "rev-parse", "--git-common-dir"],
-            capture_output=True, text=True, cwd=cwd or ".",
+            capture_output=True,
+            text=True,
+            cwd=cwd or ".",
         )
         if r.returncode == 0:
             common_dir = Path(r.stdout.strip())
@@ -81,7 +88,9 @@ def create_worktree(session_id, cwd=None):
     _ensure_gitignore(root)
     r = subprocess.run(
         ["git", "worktree", "add", str(wt), "-b", branch],
-        capture_output=True, text=True, cwd=root,
+        capture_output=True,
+        text=True,
+        cwd=root,
     )
     if r.returncode != 0:
         return None, r.stderr.strip() or "git worktree add failed"
@@ -111,7 +120,9 @@ def remove_worktree(session_id, cwd=None, force=False):
     # delete the branch too
     subprocess.run(
         ["git", "branch", "-D", branch],
-        capture_output=True, text=True, cwd=root,
+        capture_output=True,
+        text=True,
+        cwd=root,
     )
     return True, None
 
@@ -134,13 +145,17 @@ def merge_worktree(session_id, target_branch=None, cwd=None):
         # checkout target first
         r = subprocess.run(
             ["git", "checkout", target_branch],
-            capture_output=True, text=True, cwd=root,
+            capture_output=True,
+            text=True,
+            cwd=root,
         )
         if r.returncode != 0:
             return False, f"checkout {target_branch} failed: {r.stderr.strip()}"
     r = subprocess.run(
         ["git", "merge", "--no-ff", branch, "-m", f"merge goal-devin/{session_id}"],
-        capture_output=True, text=True, cwd=root,
+        capture_output=True,
+        text=True,
+        cwd=root,
     )
     if r.returncode != 0:
         return False, r.stderr.strip() or "git merge failed"
@@ -154,7 +169,9 @@ def list_worktrees(cwd=None):
     root = repo_root(cwd)
     r = subprocess.run(
         ["git", "worktree", "list", "--porcelain"],
-        capture_output=True, text=True, cwd=root,
+        capture_output=True,
+        text=True,
+        cwd=root,
     )
     if r.returncode != 0:
         return []
@@ -164,9 +181,9 @@ def list_worktrees(cwd=None):
         if line.startswith("worktree "):
             if current:
                 worktrees.append(current)
-            current = {"path": line[len("worktree "):]}
+            current = {"path": line[len("worktree ") :]}
         elif line.startswith("branch "):
-            current["branch"] = line[len("branch "):]
+            current["branch"] = line[len("branch ") :]
         elif line == "bare":
             current["bare"] = True
         elif not line:
@@ -176,8 +193,11 @@ def list_worktrees(cwd=None):
     if current:
         worktrees.append(current)
     # filter to goal-devin branches (strip refs/heads/ prefix)
-    return [w for w in worktrees
-            if w.get("branch", "").replace("refs/heads/", "").startswith(f"{BRANCH_PREFIX}/")]
+    return [
+        w
+        for w in worktrees
+        if w.get("branch", "").replace("refs/heads/", "").startswith(f"{BRANCH_PREFIX}/")
+    ]
 
 
 def _ensure_gitignore(root):

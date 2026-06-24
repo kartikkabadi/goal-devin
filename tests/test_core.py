@@ -1,4 +1,5 @@
 """Tests for goal-devin core. Run with: pytest tests/ or python -m unittest tests/test_core.py"""
+
 import json
 import sys
 import tempfile
@@ -11,8 +12,14 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from goal_devin import core
 from goal_devin.core import (
-    fmt_elapsed, state_file_for, load_state, save_state, all_states,
-    log_path, GoalLoop, latest_session_id,
+    fmt_elapsed,
+    state_file_for,
+    load_state,
+    save_state,
+    all_states,
+    log_path,
+    GoalLoop,
+    latest_session_id,
 )
 
 
@@ -42,6 +49,7 @@ class TestStatePerCwd(unittest.TestCase):
 
     def tearDown(self):
         import shutil
+
         shutil.rmtree(self.tmp, ignore_errors=True)
 
     def test_different_cwd_different_file(self):
@@ -83,6 +91,7 @@ class TestLogPath(unittest.TestCase):
 
     def tearDown(self):
         import shutil
+
         shutil.rmtree(self.tmp, ignore_errors=True)
 
     def test_log_path_rejects_traversal(self):
@@ -163,19 +172,27 @@ class TestLatestSessionId(unittest.TestCase):
     @patch("goal_devin.core.run_devin")
     def test_picks_first_matching_when_multiple(self, mock_run):
         """Multiple sessions match cwd -> first match returned."""
-        mock_run.return_value = self._cp(json.dumps([
-            {"id": "sid-first", "working_directory": "/foo/bar"},
-            {"id": "sid-second", "working_directory": "/foo/bar"},
-        ]))
+        mock_run.return_value = self._cp(
+            json.dumps(
+                [
+                    {"id": "sid-first", "working_directory": "/foo/bar"},
+                    {"id": "sid-second", "working_directory": "/foo/bar"},
+                ]
+            )
+        )
         self.assertEqual(latest_session_id("/foo/bar", retries=1), "sid-first")
 
     @patch("goal_devin.core.run_devin")
     def test_missing_workdir_skipped(self, mock_run):
         """Session with missing/empty working_directory is skipped, not matched."""
-        mock_run.return_value = self._cp(json.dumps([
-            {"id": "sid-no-cwd"},
-            {"id": "sid-empty-cwd", "working_directory": ""},
-        ]))
+        mock_run.return_value = self._cp(
+            json.dumps(
+                [
+                    {"id": "sid-no-cwd"},
+                    {"id": "sid-empty-cwd", "working_directory": ""},
+                ]
+            )
+        )
         self.assertIsNone(latest_session_id("/foo/bar", retries=1))
 
 
@@ -188,6 +205,7 @@ class TestGoalLoop(unittest.TestCase):
 
     def tearDown(self):
         import shutil
+
         shutil.rmtree(self.tmp, ignore_errors=True)
 
     def test_kill_sets_event(self):
@@ -201,13 +219,11 @@ class TestGoalLoop(unittest.TestCase):
         self.assertEqual(loop.permission_mode, "dangerous")  # default
 
     def test_sandbox_with_explicit_permission(self):
-        loop = GoalLoop(goal="test", use_sandbox=True,
-                        permission_mode="normal", cwd="/fake")
+        loop = GoalLoop(goal="test", use_sandbox=True, permission_mode="normal", cwd="/fake")
         self.assertEqual(loop.permission_mode, "normal")
 
     def test_no_sandbox_keeps_permission(self):
-        loop = GoalLoop(goal="test", use_sandbox=False,
-                        permission_mode="dangerous", cwd="/fake")
+        loop = GoalLoop(goal="test", use_sandbox=False, permission_mode="dangerous", cwd="/fake")
         self.assertEqual(loop.permission_mode, "dangerous")
 
     def test_worktree_id_stored(self):
@@ -251,9 +267,17 @@ class TestGoalLoop(unittest.TestCase):
         still find the original iters count via session_id search.
         """
         # save state with original worktree cwd
-        save_state({"session_id": "sid-123", "cwd": "/original/wt", "goal": "test",
-                    "iters": 5, "model": "glm-5.2", "status": "stopped"},
-                   cwd="/original/wt")
+        save_state(
+            {
+                "session_id": "sid-123",
+                "cwd": "/original/wt",
+                "goal": "test",
+                "iters": 5,
+                "model": "glm-5.2",
+                "status": "stopped",
+            },
+            cwd="/original/wt",
+        )
         # create loop with different cwd (worktree-deleted fallback)
         loop = GoalLoop(goal="test", session_id="sid-123", cwd="/different/path")
         statuses = []
@@ -262,8 +286,10 @@ class TestGoalLoop(unittest.TestCase):
         loop.kill()  # set kill_event so loop exits after resume branch
         loop._run()  # run directly (not in thread)
         self.assertEqual(loop.iters, 5)
-        self.assertTrue(any("iter 5" in d for s, d in statuses),
-                        f"expected 'resumed at iter 5' in statuses: {statuses}")
+        self.assertTrue(
+            any("iter 5" in d for s, d in statuses),
+            f"expected 'resumed at iter 5' in statuses: {statuses}",
+        )
 
 
 class TestNotifySplit(unittest.TestCase):
@@ -304,8 +330,10 @@ class TestEscapeApplescript(unittest.TestCase):
         # so AppleScript treats it as a literal char, not as closing the string
         for i, ch in enumerate(escaped):
             if ch == '"':
-                self.assertTrue(i > 0 and escaped[i-1] == '\\',
-                                f'unescaped quote at position {i}: {escaped!r}')
+                self.assertTrue(
+                    i > 0 and escaped[i - 1] == "\\",
+                    f"unescaped quote at position {i}: {escaped!r}",
+                )
 
 
 class TestVersionDedup(unittest.TestCase):
@@ -313,6 +341,7 @@ class TestVersionDedup(unittest.TestCase):
 
     def test_core_version_matches_init(self):
         from goal_devin import __version__ as init_version
+
         self.assertEqual(core.__version__, init_version)
 
 

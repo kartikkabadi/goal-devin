@@ -37,4 +37,8 @@ build-backend = "uv_build"
 [dependency-groups]
 dev = [
     "pytest>=8",
+    "ruff>=0.15",
 ]
+
+[tool.ruff]
+line-length = 100

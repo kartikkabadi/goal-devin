@@ -8,6 +8,7 @@ Usage:
   goal-devin logs [session-id] [-f]
   goal-devin version
 """
+
 import argparse
 import json
 import os
@@ -19,8 +20,14 @@ from pathlib import Path
 
 from . import core
 from .core import (
-    GoalLoop, load_state, all_states, find_state_by_session_id, log_path,
-    fmt_elapsed, DEFAULTS, notify,
+    GoalLoop,
+    load_state,
+    all_states,
+    find_state_by_session_id,
+    log_path,
+    fmt_elapsed,
+    DEFAULTS,
+    notify,
 )
 from .worktree import is_git_repo, create_worktree
 
@@ -37,7 +44,9 @@ class C:
     CYAN = "\033[36m"
     GRAY = "\033[90m"
 
+
 _NO_COLOR = not sys.stdout.isatty() or os.environ.get("NO_COLOR")
+
 
 def _c(text, color):
     if _NO_COLOR:
@@ -45,19 +54,26 @@ def _c(text, color):
     return f"{color}{text}{C.RESET}"
 
 
-def _run_goal_loop(goal, session_id=None, model=None, permission_mode=None,
-                   sleep_secs=None, max_iters=None, iter_timeout=None,
-                   use_worktree=False, use_sandbox=False, cwd=None,
-                   worktree_id=None):
+def _run_goal_loop(
+    goal,
+    session_id=None,
+    model=None,
+    permission_mode=None,
+    sleep_secs=None,
+    max_iters=None,
+    iter_timeout=None,
+    use_worktree=False,
+    use_sandbox=False,
+    cwd=None,
+    worktree_id=None,
+):
     """Start a GoalLoop and block until it finishes or Ctrl+C. Returns exit code."""
     done_event = threading.Event()
     result = {"reason": None, "iters": 0, "elapsed": 0}
 
     def on_iter(iters, sid, output, elapsed):
         elapsed_str = fmt_elapsed(elapsed)
-        print(f"\n  {_c(f'iter {iters}', C.BOLD)} | "
-              f"{_c(sid, C.DIM)} | "
-              f"{_c(elapsed_str, C.DIM)}")
+        print(f"\n  {_c(f'iter {iters}', C.BOLD)} | {_c(sid, C.DIM)} | {_c(elapsed_str, C.DIM)}")
         if output:
             print(output)
 
@@ -206,14 +222,19 @@ def cmd_status(args):
                 goal = goal[:47] + "..."
             status = s.get("status", "?")
             color = {
-                "running": C.GREEN, "paused": C.YELLOW,
-                "stopped": C.GRAY, "killed": C.RED, "error": C.RED,
+                "running": C.GREEN,
+                "paused": C.YELLOW,
+                "stopped": C.GRAY,
+                "killed": C.RED,
+                "error": C.RED,
             }.get(status, C.GRAY)
             print(f"  [{_c(cwd, C.BLUE)}]")
-            print(f"    {_c('session', C.DIM)} {_c(s.get('session_id', '?'), C.BOLD)}  "
-                  f"{_c('iters', C.DIM)} {_c(str(s.get('iters', 0)), C.GREEN)}  "
-                  f"{_c('model', C.DIM)} {_c(s.get('model', '?'), C.CYAN)}  "
-                  f"{_c('status', C.DIM)} {_c(status, color)}")
+            print(
+                f"    {_c('session', C.DIM)} {_c(s.get('session_id', '?'), C.BOLD)}  "
+                f"{_c('iters', C.DIM)} {_c(str(s.get('iters', 0)), C.GREEN)}  "
+                f"{_c('model', C.DIM)} {_c(s.get('model', '?'), C.CYAN)}  "
+                f"{_c('status', C.DIM)} {_c(status, color)}"
+            )
             print(f"    {_c('goal', C.DIM)} {goal}")
             print()
         return 0
@@ -261,7 +282,7 @@ def build_parser():
     p = argparse.ArgumentParser(
         prog="goal-devin",
         description="Unbounded goal-loop wrapper around the Devin CLI. "
-                    "Burn free GLM 5.2 / Kimi K 2.7 tokens toward a fixed goal.",
+        "Burn free GLM 5.2 / Kimi K 2.7 tokens toward a fixed goal.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""\
 Examples:
@@ -276,26 +297,56 @@ stop:  Ctrl+C (or --max-iters N)
 state: ~/.goal-devin/
 """,
     )
-    p.add_argument("-V", "--version", action="version",
-                   version=f"%(prog)s {core.__version__}")
+    p.add_argument("-V", "--version", action="version", version=f"%(prog)s {core.__version__}")
     common = argparse.ArgumentParser(add_help=False)
     common.add_argument("--model", default=None, help=f"Devin model (default: {DEFAULTS['model']})")
-    common.add_argument("--permission-mode", default=None,
-                        help=f"permission mode (default: {DEFAULTS['permission_mode']})")
-    common.add_argument("--sleep", type=float, default=None,
-                        help=f"seconds between iters (default: {DEFAULTS['sleep_secs']})")
-    common.add_argument("--max-iters", type=int, default=None,
-                        help=f"stop after N iters, 0=forever (default: {DEFAULTS['max_iters']})")
-    common.add_argument("--iter-timeout", type=float, default=None,
-                        help=f"per-iter timeout in seconds (default: {DEFAULTS['iter_timeout']})")
-    common.add_argument("--worktree", action="store_true", default=DEFAULTS["use_worktree"],
-                        help="create git worktree for branch isolation")
-    common.add_argument("--no-worktree", action="store_false", dest="worktree",
-                        help="don't create git worktree")
-    common.add_argument("--sandbox", action="store_true", default=DEFAULTS["use_sandbox"],
-                        help="use devin --sandbox (OS isolation, OS-level exec isolation)")
-    common.add_argument("--no-sandbox", action="store_false", dest="sandbox",
-                        help="don't use devin sandbox")
+    common.add_argument(
+        "--permission-mode",
+        default=None,
+        help=f"permission mode (default: {DEFAULTS['permission_mode']})",
+    )
+    common.add_argument(
+        "--sleep",
+        type=float,
+        default=None,
+        help=f"seconds between iters (default: {DEFAULTS['sleep_secs']})",
+    )
+    common.add_argument(
+        "--max-iters",
+        type=int,
+        default=None,
+        help=f"stop after N iters, 0=forever (default: {DEFAULTS['max_iters']})",
+    )
+    common.add_argument(
+        "--iter-timeout",
+        type=float,
+        default=None,
+        help=f"per-iter timeout in seconds (default: {DEFAULTS['iter_timeout']})",
+    )
+    common.add_argument(
+        "--worktree",
+        action="store_true",
+        default=DEFAULTS["use_worktree"],
+        help="create git worktree for branch isolation",
+    )
+    common.add_argument(
+        "--no-worktree",
+        action="store_false",
+        dest="worktree",
+        help="don't create git worktree",
+    )
+    common.add_argument(
+        "--sandbox",
+        action="store_true",
+        default=DEFAULTS["use_sandbox"],
+        help="use devin --sandbox (OS isolation, OS-level exec isolation)",
+    )
+    common.add_argument(
+        "--no-sandbox",
+        action="store_false",
+        dest="sandbox",
+        help="don't use devin sandbox",
+    )
 
     sub = p.add_subparsers(dest="command")
 

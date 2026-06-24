@@ -1,4 +1,5 @@
 """Tests for goal-devin worktree module."""
+
 import subprocess
 import sys
 import tempfile
@@ -8,8 +9,14 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from goal_devin.worktree import (
-    is_git_repo, repo_root, main_repo_root, branch_name,
-    create_worktree, remove_worktree, list_worktrees, merge_worktree,
+    is_git_repo,
+    repo_root,
+    main_repo_root,
+    branch_name,
+    create_worktree,
+    remove_worktree,
+    list_worktrees,
+    merge_worktree,
 )
 
 
@@ -114,7 +121,6 @@ class TestListWorktrees(unittest.TestCase):
             wts = list_worktrees(cwd=tmp)
             self.assertEqual(len(wts), 1)
             self.assertTrue(wts[0]["branch"].replace("refs/heads/", "").startswith("goal-devin/"))
-
 
 
 class TestMergeWorktree(unittest.TestCase):

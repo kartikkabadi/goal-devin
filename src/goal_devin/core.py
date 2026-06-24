@@ -2,6 +2,7 @@
 
 UI-agnostic. The CLI calls this module.
 """
+
 import hashlib
 import json
 import os
@@ -53,9 +54,9 @@ one-line summary of what you did.
 # --- status constants ---
 STATUS_RUNNING = "running"
 STATUS_PAUSED = "paused"
-STATUS_STOPPED = "stopped"      # stopped by user (Ctrl+C or max_iters)
-STATUS_KILLED = "killed"        # killed, cannot resume
-STATUS_ERROR = "error"          # devin failed on iter 0
+STATUS_STOPPED = "stopped"  # stopped by user (Ctrl+C or max_iters)
+STATUS_KILLED = "killed"  # killed, cannot resume
+STATUS_ERROR = "error"  # devin failed on iter 0
 
 
 # --- state management ---
@@ -124,8 +125,9 @@ def run_devin(args, timeout=None):
     except FileNotFoundError:
         raise  # let caller handle
     except subprocess.TimeoutExpired:
-        return subprocess.CompletedProcess(cmd, returncode=124, stdout="",
-                                           stderr=f"timed out after {timeout}s")
+        return subprocess.CompletedProcess(
+            cmd, returncode=124, stdout="", stderr=f"timed out after {timeout}s"
+        )
 
 
 def find_state_by_session_id(session_id):
@@ -180,11 +182,23 @@ class GoalLoop:
     Call .start() to launch, .kill() to stop. Subscribe via on_iter callback.
     """
 
-    def __init__(self, goal, session_id=None, model=None, permission_mode=None,
-                 sleep_secs=None, max_iters=None, iter_timeout=None,
-                 use_worktree=False, use_sandbox=False, cwd=None,
-                 worktree_id=None,
-                 on_iter=None, on_status=None, on_done=None):
+    def __init__(
+        self,
+        goal,
+        session_id=None,
+        model=None,
+        permission_mode=None,
+        sleep_secs=None,
+        max_iters=None,
+        iter_timeout=None,
+        use_worktree=False,
+        use_sandbox=False,
+        cwd=None,
+        worktree_id=None,
+        on_iter=None,
+        on_status=None,
+        on_done=None,
+    ):
         self.goal = goal
         self.session_id = session_id
         self.model = model or DEFAULTS["model"]
@@ -199,13 +213,13 @@ class GoalLoop:
         self.use_sandbox = use_sandbox
         self.cwd = cwd or os.getcwd()
         self.worktree_id = worktree_id
-        self.on_iter = on_iter        # callback(iters, session_id, output, elapsed)
-        self.on_status = on_status    # callback(status, detail)
-        self.on_done = on_done        # callback(reason, iters, elapsed)
+        self.on_iter = on_iter  # callback(iters, session_id, output, elapsed)
+        self.on_status = on_status  # callback(status, detail)
+        self.on_done = on_done  # callback(reason, iters, elapsed)
 
         self.kill_event = threading.Event()
         self._thread = None
-        self._proc = None             # current devin subprocess
+        self._proc = None  # current devin subprocess
         self._proc_lock = threading.Lock()
         self.iters = 0
         self.start_time = None
@@ -246,14 +260,20 @@ class GoalLoop:
         try:
             with self._proc_lock:
                 self._proc = subprocess.Popen(
-                    cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                    text=True, cwd=self.cwd)
+                    cmd,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    cwd=self.cwd,
+                )
             try:
                 stdout, stderr = self._proc.communicate(timeout=self.iter_timeout)
             except subprocess.TimeoutExpired:
                 self._proc.kill()
                 stdout, stderr = self._proc.communicate()
-                return subprocess.CompletedProcess(cmd, 124, stdout, f"timed out after {self.iter_timeout}s")
+                return subprocess.CompletedProcess(
+                    cmd, 124, stdout, f"timed out after {self.iter_timeout}s"
+                )
             return subprocess.CompletedProcess(cmd, self._proc.returncode, stdout, stderr)
         except FileNotFoundError:
             raise
@@ -268,8 +288,13 @@ class GoalLoop:
                 # iter 0: start fresh session
                 if self.on_status:
                     self.on_status(STATUS_RUNNING, "starting iter 0")
-                args = ["-p", "--model", self.model,
-                        "--permission-mode", self.permission_mode]
+                args = [
+                    "-p",
+                    "--model",
+                    self.model,
+                    "--permission-mode",
+                    self.permission_mode,
+                ]
                 if self.use_sandbox:
                     args.append("--sandbox")
                 args += ["--", INITIAL_PROMPT.format(goal=self.goal)]
@@ -287,20 +312,26 @@ class GoalLoop:
                     if self.on_done:
                         self._finish("error", 0, 0)
                     return
-                save_state({
-                    "session_id": self.session_id,
-                    "cwd": self.cwd,
-                    "goal": self.goal,
-                    "iters": 1,
-                    "model": self.model,
-                    "permission_mode": self.permission_mode,
-                    "use_worktree": self.use_worktree,
-                    "use_sandbox": self.use_sandbox,
-                    "worktree_id": self.worktree_id,
-                    "status": STATUS_RUNNING,
-                    "started_at": datetime.now().isoformat(timespec="seconds"),
-                }, cwd=self.cwd)
-                append_log(self.session_id, f"--- iter 0 (session {self.session_id}) ---\n{r.stdout}\n")
+                save_state(
+                    {
+                        "session_id": self.session_id,
+                        "cwd": self.cwd,
+                        "goal": self.goal,
+                        "iters": 1,
+                        "model": self.model,
+                        "permission_mode": self.permission_mode,
+                        "use_worktree": self.use_worktree,
+                        "use_sandbox": self.use_sandbox,
+                        "worktree_id": self.worktree_id,
+                        "status": STATUS_RUNNING,
+                        "started_at": datetime.now().isoformat(timespec="seconds"),
+                    },
+                    cwd=self.cwd,
+                )
+                append_log(
+                    self.session_id,
+                    f"--- iter 0 (session {self.session_id}) ---\n{r.stdout}\n",
+                )
                 self.iters = 1
                 if self.on_iter:
                     self.on_iter(0, self.session_id, r.stdout, 0)
@@ -336,9 +367,15 @@ class GoalLoop:
                     return
                 time.sleep(self.sleep_secs)
                 elapsed = time.monotonic() - self.start_time
-                args = ["-r", self.session_id, "-p",
-                        "--model", self.model,
-                        "--permission-mode", self.permission_mode]
+                args = [
+                    "-r",
+                    self.session_id,
+                    "-p",
+                    "--model",
+                    self.model,
+                    "--permission-mode",
+                    self.permission_mode,
+                ]
                 if self.use_sandbox:
                     args.append("--sandbox")
                 args += ["--", CONTINUE_PROMPT.format(goal=self.goal)]
@@ -363,19 +400,21 @@ class GoalLoop:
 
     def _update_state(self, status):
         state = load_state(self.cwd) or {}
-        state.update({
-            "session_id": self.session_id,
-            "cwd": self.cwd,
-            "goal": self.goal,
-            "iters": self.iters,
-            "model": self.model,
-            "permission_mode": self.permission_mode,
-            "use_worktree": self.use_worktree,
-            "use_sandbox": self.use_sandbox,
-            "worktree_id": self.worktree_id,
-            "status": status,
-            "last_iter_at": datetime.now().isoformat(timespec="seconds"),
-        })
+        state.update(
+            {
+                "session_id": self.session_id,
+                "cwd": self.cwd,
+                "goal": self.goal,
+                "iters": self.iters,
+                "model": self.model,
+                "permission_mode": self.permission_mode,
+                "use_worktree": self.use_worktree,
+                "use_sandbox": self.use_sandbox,
+                "worktree_id": self.worktree_id,
+                "status": status,
+                "last_iter_at": datetime.now().isoformat(timespec="seconds"),
+            }
+        )
         save_state(state, cwd=self.cwd)
 
 
@@ -390,10 +429,16 @@ def notify_desktop(title, message):
     plat = platform.system().lower()
     if plat == "darwin" and shutil.which("osascript"):
         try:
-            subprocess.run(["osascript", "-e",
-                            f'display notification "{_escape_applescript(message)}" '
-                            f'with title "{_escape_applescript(title)}"'],
-                           capture_output=True, timeout=5)
+            subprocess.run(
+                [
+                    "osascript",
+                    "-e",
+                    f'display notification "{_escape_applescript(message)}" '
+                    f'with title "{_escape_applescript(title)}"',
+                ],
+                capture_output=True,
+                timeout=5,
+            )
         except Exception:
             pass
     elif plat.startswith("linux") and shutil.which("notify-send"):

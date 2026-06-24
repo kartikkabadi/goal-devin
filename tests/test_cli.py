@@ -1,4 +1,5 @@
 """Tests for the CLI — verifies resume passes session_id (the bug fix)."""
+
 import io
 import os
 import sys
@@ -23,6 +24,7 @@ class TestCmdResume(unittest.TestCase):
 
     def tearDown(self):
         import shutil
+
         shutil.rmtree(self.tmp, ignore_errors=True)
 
     @patch("goal_devin.cli._run_goal_loop")
@@ -45,7 +47,7 @@ class TestCmdResume(unittest.TestCase):
         # call cmd_resume with args from argparse
         args = MagicMock()
         args.session_id = None  # should use state's session_id
-        args.goal = None        # should use state's goal
+        args.goal = None  # should use state's goal
         args.model = None
         args.permission_mode = None
         args.sleep = None

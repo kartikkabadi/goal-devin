@@ -55,8 +55,11 @@ jobs:
       - name: Install dependencies
         run: sfw uv sync --dev
 
-      - name: Check import syntax
-        run: uv run python -c "import goal_devin.cli; import goal_devin.core; import goal_devin.worktree; print('ok')"
+      - name: Ruff check
+        run: uv run ruff check .
+
+      - name: Ruff format check
+        run: uv run ruff format --check .
 
   build:
     needs: [test, lint]
