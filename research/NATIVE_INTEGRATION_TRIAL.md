@@ -22,10 +22,27 @@ The canonical product remains as corrected in Phase R0.5:
 - The selected orchestrator model is exact and sticky.
 - Workers default to the same exact model; a different worker model is allowed
   only through explicit user configuration.
+- `subagent_general` satisfies the same-model default because it inherits the
+  parent model.
+- A Goal Devin-generated custom profile with an exact `model:` pin is the
+  default read-only or policy-specific worker and satisfies the same-model
+  default when the pinned model matches the root session.
+- `subagent_explore` does **not** satisfy the same-model default because Devin
+  routes it through the default subagent model, which may differ from the root
+  model. It may only be used when the user explicitly opts into a
+  routed/different worker model.
 - No silent model fallback.
-- Native Devin subagents are used for ordinary in-session work.
+- Because Devin does not expose the effective subagent model independently, the
+  trial must distinguish selected policy, configured/requested model, and any
+  observed effective model. Never claim runtime proof of a worker model when only
+  configuration proof exists.
+- Native Devin subagents are used for ordinary in-session work; the default
+  same-model worker is `subagent_general` or a Goal Devin-generated custom
+  profile.
 - Independent `devin -p` sessions are reserved for explicitly independent Goal
   Devin jobs.
+- R1A/R1B prove profile generation and loading only; production enforcement of
+  worker model policy belongs to a later bounded phase.
 - Goal Devin remains unrelated to any project named Loop.
 - The previous `ultra --script` workflow DSL remains superseded.
 
@@ -502,27 +519,55 @@ The Rust candidate must prove the same items as R1A, plus:
    existing Python package.
 4. It must reuse the shared testkit; it must not require a separate
    independent acceptance harness.
+5. It must not claim runtime proof of worker model compliance when only profile
+   configuration proof exists.
 
 ### R1C measurement methodology
 
-All measurements must be reproducible and performed in identical conditions:
+All measurements must be reproducible and performed in identical conditions.
+Prefer at least 20 cold starts and 20 warm starts, reporting median and p95. If
+fewer than 20 runs are practical, use at least 5 cold and 5 warm starts and
+report median and maximum instead of p95. Record which variant was used.
 
-- Five or more cold starts.
-- Five or more warm starts.
-- Median and p95 startup time.
+Report separately for **candidate-only overhead** and **real end-to-end
+behavior**.
+
+#### Candidate-only overhead
+
+Run each candidate against the shared fake `devin` and measure:
+
+- Supervisor process startup.
+- Runtime-directory, hook-only config, and profile preparation.
+- Sidecar startup.
+- Cleanup after normal exit.
 - Idle RSS after a fixed interval.
 - Peak RSS during the canary.
+- Source LOC excluding tests and generated files.
+- Test LOC.
+- Build/install time.
+- Final artifact size.
+
+#### Real end-to-end behavior
+
+Run each candidate against the same installed real `devin` binary and measure:
+
+- Supervisor start to child `devin` spawn.
+- Child spawn to native TUI readiness, only where a non-invasive measurement is
+  possible. Do not parse or screen-scrape the native TUI output merely to
+  obtain a readiness timestamp. Record any limitation if readiness cannot be
+  measured non-invasively.
+- Complete canary runtime.
+- Cleanup after child exit.
+- Signal and cleanup behavior (normal exit, `SIGINT`, launch failure).
+
+Additional controls:
+
 - Release-mode Rust binary.
 - Normal non-debug Python execution.
 - Identical machine and environment.
 - Identical `devin` executable.
 - Identical fake/live tasks.
 - Exact measurement boundaries.
-- Source LOC excluding tests and generated files.
-- Test LOC.
-- Build/install time.
-- Final artifact size.
-- Signal and cleanup behavior.
 
 Do not use subjective impressions as a deciding metric.
 

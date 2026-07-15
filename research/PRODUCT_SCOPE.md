@@ -6,7 +6,8 @@ This document replaces any prior product interpretation. It aligns Goal Devin wi
 
 1. **Preserve and harden the existing autonomous goal-loop functionality.**
    - The `goal` and `resume` subcommands must continue to work exactly as they do today.
-   - Per-cwd state, atomic state writes, `devin list` session resolution, worktree create/keep/remove rules, log format, exit codes, and env var defaults must be preserved.
+   - Per-cwd state, atomic state writes, explicit session resume behavior, worktree create/keep/remove rules, log format, exit codes, and env var defaults must be preserved.
+   - Session identity must prefer `devin -p --export` ATIF and ACP `session/new`, test native TUI `--export` support, and keep `devin list --format json` only as a compatibility fallback with a known concurrency race. Goal Devin must never parse Devin's private `sessions.db`.
 
 2. **Add an interactive `dev` mode that launches the genuine native Devin TUI.**
    - The provisional command is `goal-devin dev`.
@@ -21,11 +22,20 @@ This document replaces any prior product interpretation. It aligns Goal Devin wi
    - Before launch: show session model, permission mode, worktree status, and any policy warnings.
    - After exit: record outcome, show summary, maintain logs, and (later) verify expected software-development outcomes.
 
-5. **Model selection.**
+5. **Model selection and worker policy.**
    - Let the user select **one exact orchestrator model** for a session.
-   - Default all workers to the **same exact model**.
-   - Allow a different worker model only through **explicit user configuration**.
+   - Default all workers to the **same exact model** as the root session.
+   - `subagent_general` satisfies this default because it inherits the parent model.
+   - A Goal Devin-generated custom profile with an exact `model:` pin is the default read-only or policy-specific worker.
+   - `subagent_explore` does **not** satisfy the same-model default because Devin routes it through the default subagent model, which may differ from the root model.
+   - `subagent_explore` may only be used when the user explicitly opts into a routed/different worker model.
+   - Any other custom profile that uses a different model also requires explicit user configuration.
    - Never silently switch models.
+   - Because Devin does not expose the effective subagent model independently, Goal Devin must distinguish:
+     - the selected policy;
+     - the configured/requested model (frontmatter or profile choice);
+     - the observed effective model (where it can be inferred from ATIF or other non-invasive evidence).
+   - Never claim runtime proof of a worker model when only configuration proof exists.
 
 6. **Rate-limit and transient-failure handling.**
    - Detect rate limits.
@@ -34,7 +44,9 @@ This document replaces any prior product interpretation. It aligns Goal Devin wi
    - Use bounded retries.
 
 7. **Subagent usage.**
-   - Use **native Devin subagents** where appropriate (read-only `subagent_explore`, write-capable `subagent_general`, custom profiles).
+   - Use **native Devin subagents** where appropriate.
+   - The default same-model worker is `subagent_general` or a Goal Devin-generated custom profile with the exact root model.
+   - `subagent_explore` is only appropriate when the user explicitly accepts a routed/different worker model.
    - Use independent `devin -p` sessions only for explicitly Goal Devin-owned jobs where independent sessions are semantically correct (e.g., stateless verifiers, detached watchers).
 
 8. **Existing commands.**
@@ -53,6 +65,7 @@ This document replaces any prior product interpretation. It aligns Goal Devin wi
 - A complete native-TUI reimplementation or dashboard.
 - Rate-limit auto-retry (to be designed after evidence).
 - PTY interception, keyboard injection, or screen scraping of the Devin TUI.
+- Production-grade enforcement of worker model selection (R1A/R1B prove profile generation and loading only; enforcement belongs to a later bounded phase).
 
 ## Relationship to Ultra Code / dynamic workflows
 

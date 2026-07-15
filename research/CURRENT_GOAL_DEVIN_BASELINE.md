@@ -214,13 +214,23 @@ Each iteration appends a delimiter:
 
 - Per-directory state keyed by `cwd` hash.
 - Atomic state writes.
+- Observable session continuity and existing state-file compatibility.
+- Explicit session resume behavior.
 - `devin -p` for iter 0 and `devin -r <sid> -p` for continuation.
-- Session resolution by matching `working_directory` exactly, with retries, no fallback.
+- Session identity: prefer `devin -p --export` ATIF and ACP `session/new`; test
+  native TUI `--export` support; keep `devin list --format json` matching
+  `working_directory` (with retries, no fallback) only as a compatibility
+  fallback with a known concurrency race.
+- Never parse Devin's private `sessions.db`.
 - Worktree creation/cleanup semantics (kill removes, max_iters/error keeps).
 - Worktree path fallback on resume.
 - CLI flag/env names and defaults.
 - `goal`, `resume`, `status`, `logs`, `version` commands.
 - `NO_COLOR` support.
+
+Public session-continuity behavior is not the same as the race-prone
+`latest_session_id()` implementation. A rewrite may replace the list-based
+heuristic with ATIF/ACP identity as those seams become available and tested.
 
 ## 19. Superseded historical proposals
 

@@ -102,6 +102,6 @@ A `refinery_schema_history` table confirms migration-based schema management.
 ## Goal Devin implications
 
 - Goal Devin must not assume a fixed `devin` path; `which devin` resolves through the `current` symlink.
-- Session identity methods should prefer the `sessions.db` `id` field, but that table is private and not exposed through a public CLI. `devin list --format json` is the only public seam.
+- Session identity must prefer `devin -p --export` ATIF and ACP `session/new`, test native TUI `--export` support, and keep `devin list --format json` only as a compatibility fallback with a known concurrency race. Goal Devin must never read, parse, or depend on Devin's private `sessions.db`.
 - `devin list --format json` output schema is not guaranteed to match the DB columns exactly; only `id` and `working_directory` are known to be used by Goal Devin.
 - A future Rust Goal Devin must avoid writing into `~/.config/devin/` or `~/.local/share/devin/` unless intentionally wrapping `devin`; its own state should live under `~/.goal-devin/` or XDG equivalents.

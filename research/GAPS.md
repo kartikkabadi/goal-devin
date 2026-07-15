@@ -48,14 +48,23 @@ empirically known.
 ### Effective subagent model visibility
 
 **What we could not do**: Confirm the exact model used by `subagent_explore` or
-a custom profile.
+a custom profile, or empirically verify that `subagent_general` always inherits
+the parent model.
 
-**Why**: The CLI does not label subagent models in hooks, ATIF, or TUI.
+**Why**: The CLI does not label subagent models in hooks, ATIF, or TUI, so
+there is no independent observation of the *effective* worker model. Goal
+Devin can only record the *selected policy*, the *configured/requested model*
+(profile or `model:` frontmatter), and any *observed effective model* inferred
+from non-invasive evidence.
 
-**Impact**: Goal Devin must trust documented inheritance rules and cannot
-verify worker model compliance.
+**Impact**: Goal Devin must trust documented inheritance rules. It cannot
+claim runtime proof that a worker ran on the root model when only configuration
+proof exists. `subagent_explore` does not satisfy the same-model default because
+it is routed through the default subagent model; it should only be used when the
+user explicitly opts into a routed/different worker model.
 
-**Location**: `research/DEVIN_MODEL_BEHAVIOR.md`.
+**Location**: `research/DEVIN_MODEL_BEHAVIOR.md`,
+`research/DEVIN_SUBAGENT_BEHAVIOR.md`.
 
 ### Full interactive TUI features
 

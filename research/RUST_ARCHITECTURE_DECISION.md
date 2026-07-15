@@ -95,8 +95,8 @@ Pros:
 
 Cons:
 
-- Requires building the Rust project, dependency resolution, and a new test
-  harness.
+- Requires Rust-specific build tooling and candidate-specific unit tests while
+  still using the shared black-box acceptance testkit.
 - Re-implementing the `GoalLoop`/worktree/state layer would be out of scope.
 - Must reuse the shared testkit; it cannot rely on a separate independent
   acceptance harness.
@@ -126,24 +126,45 @@ Both candidates must be evaluated on:
 
 ## R1C measurement methodology
 
-All measurements must be reproducible and performed in identical conditions:
+All measurements must be reproducible and performed in identical conditions.
+Prefer at least 20 cold starts and 20 warm starts, reporting median and p95. If
+fewer than 20 runs are practical, use at least 5 cold and 5 warm starts and
+report median and maximum instead of p95. Record which variant was used.
 
-- Five or more cold starts.
-- Five or more warm starts.
-- Median and p95 startup time.
+Report separately for **candidate-only overhead** and **real end-to-end
+behavior**.
+
+**Candidate-only overhead** (against the shared fake `devin`):
+
+- Supervisor process startup.
+- Runtime-directory, hook-only config, and profile preparation.
+- Sidecar startup.
+- Cleanup after normal exit.
 - Idle RSS after a fixed interval.
 - Peak RSS during the canary.
+- Source LOC excluding tests and generated files.
+- Test LOC.
+- Build/install time.
+- Final artifact size.
+
+**Real end-to-end behavior** (against the same installed real `devin` binary):
+
+- Supervisor start to child `devin` spawn.
+- Child spawn to native TUI readiness, only where a non-invasive measurement is
+  possible. Do not parse or screen-scrape the native TUI output merely to
+  obtain a readiness timestamp. Record any limitation.
+- Complete canary runtime.
+- Cleanup after child exit.
+- Signal and cleanup behavior (normal exit, `SIGINT`, launch failure).
+
+**Controls**:
+
 - Release-mode Rust binary.
 - Normal non-debug Python execution.
 - Identical machine and environment.
 - Identical `devin` executable.
 - Identical fake/live tasks.
 - Exact measurement boundaries.
-- Source LOC excluding tests and generated files.
-- Test LOC.
-- Build/install time.
-- Final artifact size.
-- Signal and cleanup behavior.
 
 Do not use subjective impressions as a deciding metric. The full methodology is
 also recorded in `research/NATIVE_INTEGRATION_TRIAL.md`.
@@ -195,7 +216,7 @@ Candidate crates:
 | Termcap | `crossterm` | Confirmed in Devin; portable. |
 | TUI | `ratatui` | If a rich TUI is needed; Devin uses custom `scrollback`, but Ratatui is the community standard. |
 | Git | `git2` or `gix` | Worktree/branch operations. |
-| SQLite | `rusqlite` | If mirroring `sessions.db` locally. |
+| SQLite | `rusqlite` | Only if Goal Devin later needs its own database with a Goal Devin-owned schema. Never mirror, parse, or depend on Devin's private `sessions.db`. |
 | Testing | `insta` / `assert_cmd` | Snapshot and CLI assertions. |
 
 ## Conclusion

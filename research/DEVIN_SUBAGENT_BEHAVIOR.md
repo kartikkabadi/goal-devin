@@ -11,8 +11,8 @@
 
 | Profile | Description | Tool Access | Model |
 |---------|-------------|-------------|-------|
-| `subagent_explore` | Read-only codebase exploration and research | Read-only codebase tools + web search; cannot edit files or fetch arbitrary URLs | Default subagent model (SWE-1.6 by default, router-resolved) |
-| `subagent_general` | General-purpose tasks including code changes | Full tool access (foreground) or pre-approved tools only (background) | Same model as the parent agent |
+| `subagent_explore` | Read-only codebase exploration and research | Read-only codebase tools + web search; cannot edit files or fetch arbitrary URLs | Default subagent model (SWE-1.6 by default, router-resolved). **Does not satisfy the same-model default** because it is routed through the default subagent model, which may differ from the parent model. |
+| `subagent_general` | General-purpose tasks including code changes | Full tool access (foreground) or pre-approved tools only (background) | Same model as the parent agent. Satisfies the Goal Devin same-model default. |
 
 Source: `docs.devin.ai/cli/subagents`.
 
@@ -20,9 +20,9 @@ Source: `docs.devin.ai/cli/subagents`.
 
 | Profile | Model source |
 |---------|--------------|
-| `subagent_explore` | Default subagent model. Not fixed — resolved through a router at spawn time. With the default Subagent router setting it resolves to SWE-1.6. An admin can override it. |
-| `subagent_general` | Same model as the parent agent (whatever was selected in the model picker). |
-| Custom subagent | The `model:` field in `AGENT.md` if set, otherwise the default subagent model. |
+| `subagent_explore` | Default subagent model. Not fixed — resolved through a router at spawn time. With the default Subagent router setting it resolves to SWE-1.6. An admin can override it. Because it does not inherit the parent model, it **does not satisfy** the Goal Devin same-model default and should only be used when the user explicitly opts into a routed/different worker model. |
+| `subagent_general` | Same model as the parent agent (whatever was selected in the model picker). Satisfies the Goal Devin same-model default. |
+| Custom subagent | The `model:` field in `AGENT.md` if set, otherwise the default subagent model. If the `model:` value differs from the parent model, it requires explicit user configuration to satisfy Goal Devin's policy. |
 
 There is no way to name a model for a subagent in a natural-language prompt — the `run_subagent` tool takes a profile, not a model.
 
@@ -117,7 +117,9 @@ Independent `devin -p` sessions are **not** the only available architecture; the
 
 ## Implications for Goal Devin
 
-- Use native `subagent_explore` for read-only research, `subagent_general` for write-capable subtasks, and custom profiles when Goal Devin needs explicit, visible session policy.
+- Use `subagent_general` or a Goal Devin-generated custom profile with the exact root `model:` pin as the default same-model worker.
+- Use `subagent_explore` for read-only research only when the user explicitly opts into a routed/different worker model; it does not satisfy the same-model default.
 - Any Goal Devin-generated custom profile must be session-scoped, clearly owned (e.g. `goal-devin-worker-<nonce>`), narrowly permissioned, and safely cleaned up after exit.
+- Do not claim runtime proof of a worker model when only configuration proof exists; Devin does not independently expose the effective subagent model.
 - Do not build an alternate fan-out mechanism using independent `devin -p` sessions as the default; reserve that for Goal Devin-owned verifiers or watchers.
 - Treat `is_background` as the devin-determined foreground/background flag; Goal Devin should not force background mode for subagents because background subagents cannot prompt for new permissions.

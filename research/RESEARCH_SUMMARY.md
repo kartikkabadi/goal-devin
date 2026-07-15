@@ -31,10 +31,14 @@ Full scope: `research/PRODUCT_SCOPE.md`.
   `bypass`), and `autonomous` (requires `--sandbox`). `smart` is rejected.
   `research/DEVIN_VERSION_COMPATIBILITY.md` documents this discrepancy and the
   feature-detection recommendation.
-- **Subagent behavior**: `subagent_general` inherits the parent model,
-  `subagent_explore` uses the default subagent model, and custom profiles use
-  `model:` in `AGENT.md`. The internal `run_subagent` tool schema was observed
-  live: `title`, `task`, `profile`, `is_background`.
+- **Subagent behavior / worker model policy**: `subagent_general` inherits the
+  parent model and satisfies the same-model default. `subagent_explore` uses
+  the default subagent model and does **not** satisfy the same-model default;
+  it is only appropriate when the user explicitly opts into a
+  routed/different worker model. Custom profiles use `model:` in `AGENT.md` and
+  require explicit user configuration when they differ from the root model. The
+  internal `run_subagent` tool schema was observed live: `title`, `task`,
+  `profile`, `is_background`.
 - **Model behavior**: `swe-1-7` is a valid identifier for the installed binary.
   The native TUI and ATIF export confirm the effective model `SWE-1.7`.
 - **Session identity**: `devin -p --export <path>` produces an ATIF file
@@ -42,7 +46,8 @@ Full scope: `research/PRODUCT_SCOPE.md`.
   (`model_name`). `devin acp` `session/new` returns an explicit `sessionId`.
   Both are **OBSERVED LIVE** and preferred over `devin list --format json`,
   which is a fallback heuristic with a known concurrency race. Native TUI
-  `--export` support is still unproven.
+  `--export` support is still unproven. Goal Devin must never parse Devin's
+  private `sessions.db`.
 - **Hooks**: Observation-only `PreToolUse`/`PostToolUse` hooks are viable and
   expose `tool_name`, `tool_input`, `tool_use_id`, `tool_response`. Trial
   hook injection must not copy or merge user/project config that may
@@ -92,7 +97,7 @@ Full scope: `research/PRODUCT_SCOPE.md`.
   list delays, timestamp collisions, or across all Devin versions.
 - Rate-limit error shape and retry behavior: not triggered.
 - Exact `read_subagent` tool schema and background subagent parent notification.
-- Effective subagent model visibility (CLI does not expose it).
+- Effective subagent model visibility: Devin does not expose the exact model used by `subagent_explore` or custom profiles, so Goal Devin can only record selected policy, configured/requested model, and observed effective model; it cannot claim runtime proof when only configuration proof exists. `subagent_explore` does not satisfy the same-model default.
 - Full interactive TUI features such as model picker and subagent indicator
   (only basic operation observed).
 - Long-term session behavior (compaction, large context, multi-turn TUI).
