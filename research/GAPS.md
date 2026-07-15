@@ -1,65 +1,114 @@
 # Goal Devin — Research Gaps
 
-This phase intentionally did not implement or run everything. The following gaps are acknowledged and should be addressed before a full architecture/implementation phase.
+This phase intentionally did not implement or run everything. The following
+gaps are acknowledged and should be addressed as work proceeds.
 
-## Authentication / live session gap
+## Closed in Phase R0.5
 
-**What we could not do**: Run real `devin -p` or `devin -r` sessions.
+- **Authentication / live session**: Resolved by writing a valid
+  `~/.local/share/devin/credentials.toml` in isolated `HOME` directories. Real
+  `devin -p` and `devin -r` sessions now run.
+- **Real TUI**: A PTY-driven capture via `research/fixtures/tui-pexpect.py`
+  launched the native TUI, sent input, and exited cleanly.
+- **Hooks**: Real `PreToolUse`/`PostToolUse`/`SessionStart`/`UserPromptSubmit`/
+  `Stop`/`SessionEnd` payloads were captured with an observation-only hook.
+- **Subagent schema**: `run_subagent` input/output shape was observed live.
+- **Custom subagent profile**: `.devin/agents/reviewer/AGENT.md` with `model:`
+  frontmatter was loaded and used.
+- **Session identity**: `devin list --format json` shape and newest-first
+  ordering confirmed.
 
-**Why**: `devin -p` requires a stored credential or a completed browser/PKCE login. The available `WINDSURF_API_KEY` authenticates `devin acp` API calls but does not satisfy `devin -p` login. A browser login could not be completed headlessly.
+## Still open
 
-**Impact**: Session identity, resume, model behavior, subagent behavior, hooks, rate limits, and real TUI behavior were inferred from documentation, strings, and ACP handshake rather than live observation.
+### Rate-limit behavior
 
-**Mitigation**: 
+**What we could not do**: Capture a real rate-limit event.
 
-- The fake `devin` provides a deterministic black-box contract for Goal Devin's current behavior.
-- ACP handshake and `session/new` prove the richer integration seam is viable.
-- Live session testing should be done in a later phase with a real login or a dedicated service user API key.
+**Why**: No rate limit occurred naturally; intentionally triggering one would be
+abusive and consume paid usage.
 
-## ACP `session/prompt` gap
+**Impact**: Goal Devin cannot yet implement rate-limit detection and backoff.
 
-**What we could not do**: Send a `session/prompt` and observe the full turn lifecycle.
+**Location**: `research/DEVIN_RATE_LIMIT_BEHAVIOR.md`.
 
-**Why**: It would consume model tokens/ACU and require the ACP server to be authenticated for inference.
+### Background subagent and `read_subagent` semantics
 
-**Impact**: Tool-call streaming, permission requests, stop reasons, and error payloads are documented but not empirically verified.
+**What we could not do**: Exercise a background subagent or the `read_subagent`
+tool.
 
-## Real TUI gap
+**Why**: The live tests used foreground subagents in `devin -p` mode; background
+mode and subagent state inspection are TUI/native features.
 
-**What we could not do**: Observe the full interactive TUI (alternate screen, resize, mouse, color modes).
+**Impact**: Full subagent panel behavior and parent notification are not
+empirically known.
 
-**Why**: The TUI requires an authenticated session. Only the startup ANSI sequence capture was possible.
+**Location**: `research/LIVE_SUBAGENT_BEHAVIOR.md`.
 
-**Impact**: Terminal/theme docs are based on strings and a 5-second TTY capture, not extended usage.
+### Effective subagent model visibility
 
-## Rate-limit gap
+**What we could not do**: Confirm the exact model used by `subagent_explore` or
+a custom profile.
 
-**What we could not do**: Capture a rate-limit event.
+**Why**: The CLI does not label subagent models in hooks, ATIF, or TUI.
 
-**Why**: No rate limit occurred naturally and intentionally triggering one would be abusive.
+**Impact**: Goal Devin must trust documented inheritance rules and cannot
+verify worker model compliance.
 
-## Hook protocol gap
+**Location**: `research/DEVIN_MODEL_BEHAVIOR.md`.
 
-**What we could not do**: Run a real hook and capture stdin/stdout.
+### Full interactive TUI features
 
-**Why**: Hooks fire during lifecycle events inside a `devin -p` session.
+**What we could not do**: Test the native model picker, subagent indicator,
+subagent panel, permission prompts, or interrupted exit recovery.
 
-## Subagent schema gap
+**Why**: The PTY probe only exercised basic input, `/exit`, and `Esc`/`Ctrl+C`
+fallbacks.
 
-**What we could not do**: Determine the exact input schema or CLI seam for Devin's internal `agent()`/`subagent()` tool.
+**Impact**: Some TUI integration details (e.g. permission prompt handling) remain
+undocumented.
 
-**Why**: It is an internal feature not exposed through `devin --help`; only strings are available.
+**Location**: `research/LIVE_NATIVE_TUI.md`.
 
-## Binary internals gap
+### Long-session behavior
 
-**What we could not do**: Confirm the exact Cargo workspace layout, crate graph, or WebSocket/protobuf endpoints.
+**What we could not do**: Observe compaction, context-window limits, or multi-turn
+TUI sessions over many minutes.
 
-**Why**: Only non-invasive `strings`, `readelf`, and `ldd` were used. Decompilation was not performed per phase rules.
+**Why**: All live sessions were tiny and short.
 
-## Recommended next steps to close gaps
+**Impact**: Reliability policies for long-running orchestration are not
+empirically grounded yet.
 
-1. Obtain a `cog_` service-user API key or complete `devin auth login` in a controlled environment.
-2. Run one minimal `devin -p` session and capture `devin list --format json` output immediately after.
-3. Run a full `devin acp` `session/prompt` turn with a trivial prompt and capture `session/update` notifications.
-4. Observe the interactive TUI in a real terminal for 30-60 seconds and capture ANSI sequences.
-5. Wait for a natural rate-limit event and capture the error shape.
+### `devin acp` full turn lifecycle
+
+**What we could not do**: Send `session/prompt` and observe the complete stream
+of `session/update` notifications for a real turn.
+
+**Why**: It consumes tokens and was not required for the current corrected
+scope.
+
+**Impact**: ACP-based orchestration is not yet proven end-to-end.
+
+**Location**: `research/DEVIN_ACP_PROTOCOL.md`.
+
+### Permission-mode feature detection
+
+**What we could not do**: Determine a robust runtime way to enumerate the exact
+permission modes accepted by an arbitrary installed `devin` version.
+
+**Why**: Only v3000.1.27 was tested.
+
+**Impact**: Future versions may accept different aliases; Goal Devin should pass
+user input through and let `devin` validate it.
+
+**Location**: `research/DEVIN_VERSION_COMPATIBILITY.md`.
+
+## Recommended next steps
+
+1. Run the native-integration trial (`research/NATIVE_INTEGRATION_TRIAL.md`).
+2. When a rate-limit occurs naturally, capture the error and update
+   `DEVIN_RATE_LIMIT_BEHAVIOR.md`.
+3. Extend the TUI probe to exercise the model picker, subagent panel, and
+   permission prompt.
+4. Perform a full `devin acp` `session/prompt` turn if ACP becomes the chosen
+   integration seam.

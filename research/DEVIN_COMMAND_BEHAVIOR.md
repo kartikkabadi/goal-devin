@@ -1,6 +1,16 @@
 # Devin CLI — Command Behavior
 
-Observations are split between the **real** `devin` binary (version 3000.1.27) with an isolated `HOME`, and the **fake** `devin` used to exercise `goal-devin`. Commands that would consume model tokens or require interactive login are marked as not run.
+## Evidence classification
+
+- **DOCUMENTED** — from the official Devin CLI public documentation.
+- **OBSERVED LIVE** — from the installed `devin` binary in this research phase.
+- **INFERRED** — deduced from other evidence but not directly observed.
+- **UNKNOWN** — not yet determined.
+
+## Notes on this document
+
+Observations are split between the **real** `devin` binary (version `3000.1.27`)
+with an isolated `HOME`, and the **fake** `devin` used to exercise `goal-devin`.
 
 ## Real binary commands
 
@@ -15,43 +25,71 @@ Observations are split between the **real** `devin` binary (version 3000.1.27) w
 ### `devin --help`
 
 - **Exit**: `0`
-- **Stdout**: full options and subcommands list (see `.research-evidence/commands/real-help.out`).
+- **Stdout**: full options and subcommands list (see `.research-evidence/commands/v3000.1.27-help.out`).
 - **Key facts**:
   - Default permission mode is `auto`.
   - Sandbox is `[Research Preview]`.
   - `--model` examples include Claude, OpenAI Codex, GLM, Kimi.
   - `-p/--print` runs non-interactively.
   - `-r/--resume` and `-c/--continue` exist.
+- **Live discrepancy**: `--help` lists `smart` as a permission mode, but the
+  executable rejects it. See `DEVIN_VERSION_COMPATIBILITY.md`.
 
-### `devin auth status` (with `WINDSURF_API_KEY` set but no stored login)
-
-- **Exit**: `0`
-- **Stdout**:
-  ```text
-  Not logged in.
-    Credentials path: <home>/.local/share/devin/credentials.toml
-  Run `devin auth login` to authenticate.
-  ```
-- **Observation**: `WINDSURF_API_KEY` is **not** treated as stored credentials by `auth status`; it is consumed by `devin acp` and possibly by `devin -p` only after an auth flow.
-
-### `devin list --format json` (no sessions)
+### `devin auth status` (with stored credentials)
 
 - **Exit**: `0`
-- **Stdout**: `[]`
-- **Stderr**: empty
-- **Observation**: Returns a JSON array even when no sessions exist.
+- **Observation**: After creating a valid `~/.local/share/devin/credentials.toml`
+  with a `windsurf_api_key` field, `devin auth status` reports:
+  - Logged in (via API key)
+  - Credentials file path
+  - API server
+  - User name/email/user id
+  - Account tier/plan/team id
+  - Team settings including allowed models and sandbox option
+- **Security note**: The exact user/account identifiers are not committed; only
+  the fact that authentication succeeded is recorded.
 
-### `devin -p --model glm-5.2 --permission-mode dangerous -- <prompt>` (without stored login)
+### `devin list --format json`
 
-- **Exit**: `1` (timeout `124` if timeout fires, but here `1`)
-- **Stdout**: `[1mWelcome to Devin CLI![0m` followed by `Error: Login canceled`
-- **Observation**: `devin -p` does **not** authenticate purely from `WINDSURF_API_KEY`; it requires a completed `devin auth login` flow (browser or manual PKCE code).
+- **Exit**: `0`
+- **Stdout**: JSON array of session objects, newest first.
+- **Shape** (OBSERVED LIVE):
+  - `id`, `short_id`, `working_directory`, `working_directory_display`,
+    `last_activity_at`, `last_activity_ago`, `title`
+- **Repeatable**: yes
+- **Safety**: Returns all sessions for the current directory; picking the first
+  element gives the newest.
 
-### `devin auth login --force-manual-token-flow` (token piped to stdin)
+### `devin -p --model swe-1-7 --permission-mode accept-edits -- <prompt>` (authenticated)
 
-- **Exit**: `1`
-- **Stdout**: OAuth URL to open in browser, then `Error: Failed to read code - user canceled`
-- **Observation**: The manual flow expects a PKCE authorization code from the browser, not the `WINDSURF_API_KEY` token. A real login session could not be completed in this headless environment.
+- **Exit**: `0`
+- **Stdout**: agent response text
+- **Stderr**: empty or `✓ Organization: <org>`
+- **Observation**: Print mode works when credentials are stored. It creates a
+  session visible in `devin list`.
+
+### `devin -r <session-id> -p --model swe-1-7 --permission-mode accept-edits -- <prompt>` (authenticated)
+
+- **Exit**: `0`
+- **Observation**: Resumes the same session id, updates `last_activity_at`,
+  preserves `working_directory`, and continues conversation context. See
+  `LIVE_SESSION_RESUME.md`.
+
+### Permission-mode acceptance matrix
+
+Live `devin -p` tests with `--model swe-1-7`:
+
+| `--permission-mode` | Result |
+|----------------------|--------|
+| `auto` | Accepted, exit 0 |
+| `normal` | Accepted, exit 0 |
+| `accept-edits` | Accepted, exit 0 |
+| `dangerous` | Accepted, exit 0 |
+| `bypass` | Accepted, exit 0 |
+| `autonomous` | Rejected without `--sandbox`, exit 1 |
+| `smart` | Rejected, exit 2 |
+
+See `DEVIN_VERSION_COMPATIBILITY.md` for the exact error text.
 
 ### Subcommand helps
 
@@ -90,17 +128,17 @@ Notable `acp` help details:
 
 ## Commands not run
 
-- Real `devin -p` with an authenticated session (blocked by login requirement).
-- `devin -r` with a real session.
-- `devin export`.
-- `devin cloud`.
-- `devin mcp`.
-- `devin acp` full JSON-RPC flow.
-- `devin sandbox setup` (could be run safely; see note below).
+- `devin cloud`
+- `devin mcp`
+- `devin acp` full JSON-RPC flow beyond `initialize`/`session/new`
+- `devin sandbox setup` (could be run safely)
 
 ## Notes and risks
 
-- `devin -p` **requires stored credentials** even if `WINDSURF_API_KEY` is present, unless a supported non-interactive auth seam is found. This is a critical integration constraint for any headless wrapper like Goal Devin.
-- `devin list --format json` returns `[]` immediately without a network round-trip when no sessions exist; it is safe to call frequently.
+- `devin -p` requires stored credentials in `~/.local/share/devin/credentials.toml`
+  (or a completed `devin auth login`); the `WINDSURF_API_KEY` environment variable
+  alone is not sufficient for `devin -p` but is used by `devin acp`.
+- `devin list --format json` returns `[]` immediately when no sessions exist; it is
+  safe to call frequently.
 - `devin --help` and `devin <subcommand> --help` are entirely local and deterministic.
 - The `goal-devin` behavior contract is reproducible with the fake fixture and an isolated `HOME`.

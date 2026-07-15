@@ -1,56 +1,93 @@
-# Goal Devin — Research Summary (Phase R0)
+# Goal Devin — Research Summary (Phase R0.5)
 
-1. **Is Devin CLI confirmed to be Rust?**
-   Yes. The binary is a statically linked ELF64 PIE binary with Rust panic strings, Cargo registry source paths, and internal crates named `chisel`, `chisel-agent`, and `scrollback`.
+This summary documents the corrected product scope and the live Devin
+integration evidence collected in Phase R0.5. Phase R0 was the initial
+baseline; see the commit history for those documents.
 
-2. **What Rust libraries used by Devin are actually confirmed?**
-   `tokio` (1.35.0), `tokio-tungstenite` (0.28.0), `hyper` (0.14.28), `reqwest`, `serde` (1.0.195), `clap` builder (4.5.60), `tracing-subscriber` (0.3.22), `crossterm`, `unsafe-libyaml` (0.2.11), and `rusqlite`/SQLite.
+## 1. Corrected product scope
 
-3. **What remains unknown?**
-   The exact Cargo workspace graph, WebSocket/protobuf backend schema, full TUI rendering internals, `devin -p` auth flow headless automation, real session identity with `devin list` scope, and rate-limit error shape.
+- Preserve the existing autonomous `goal`/`resume` loop.
+- Add an interactive mode that launches the genuine native Devin TUI and hands
+the terminal to `devin`.
+- Add Goal Devin-owned status, policy, reliability, and verification around the
+native TUI.
+- Enforce exact orchestrator model selection; default all workers to the same
+model; allow different worker models only through explicit user configuration.
+- Detect rate limits and wait for the selected model.
+- Use native Devin subagents where appropriate; use independent `devin -p`
+sessions only for Goal Devin-owned jobs.
+- Remain completely separate from any project named Loop.
+- The old `goal-devin ultra --script` trial is superseded by
+`research/NATIVE_INTEGRATION_TRIAL.md`.
 
-4. **Should Goal Devin be rewritten in Rust?**
-   Not in the next phase. The Python code is small, correct, and stdlib-only. Implement `ultra` in Python first; consider Rust only if distribution or TUI performance becomes a hard requirement.
+Full scope: `research/PRODUCT_SCOPE.md`.
 
-5. **Why?**
-   The risk of the rewrite (state path compatibility, argv matrices, worktree lifecycle) outweighs the language benefit at this stage. The `ultra` feature is an orchestration layer that can be built on `asyncio` and `devin -p`/`devin acp` without rewriting the existing CLI.
+## 2. What was corrected from R0
 
-6. **Which public integration seams should Goal Devin use?**
-   Primary: `devin -p` and `devin -r` for single-turn continuation. Secondary: `devin acp` over stdio JSON-RPC for richer session control, model selection, and progress events. Avoid parsing `sessions.db` directly.
+- **Permission modes**: The installed `devin` v3000.1.27 `--help` lists `auto`,
+  `accept-edits`, `smart`, `dangerous`, but the executable actually accepts
+  `normal` (alias `auto`), `accept-edits`, `dangerous` (aliases `yolo`,
+  `bypass`), and `autonomous` (requires `--sandbox`). `smart` is rejected.
+  `research/DEVIN_VERSION_COMPATIBILITY.md` documents this discrepancy and the
+  feature-detection recommendation.
+- **Subagent behavior**: `subagent_general` inherits the parent model,
+  `subagent_explore` uses the default subagent model, and custom profiles use
+  `model:` in `AGENT.md`. The internal `run_subagent` tool schema was observed
+  live: `title`, `task`, `profile`, `is_background`.
+- **Model behavior**: `swe-1-7` is a valid identifier for the installed binary.
+  The native TUI and ATIF export confirm the effective model `SWE-1.7`.
+- **Public interfaces**: `devin list --format json` returns `id`, `short_id`,
+  `working_directory`, `working_directory_display`, `last_activity_at`,
+  `last_activity_ago`, `title`. The first element is the newest session.
+- **Hooks**: Observation-only `PreToolUse`/`PostToolUse` hooks are viable and
+  expose `tool_name`, `tool_input`, `tool_use_id`, `tool_response`.
+- **Native TUI**: The TUI enters alternate screen, uses `crossterm` terminal
+  sequences (cursor hide, bracketed paste, mouse, Kitty keyboard, synchronized
+  updates), displays model `SWE-1.7`, and exits cleanly on `/exit`.
+- **Authentication**: `devin -p` requires stored credentials in
+`~/.local/share/devin/credentials.toml` (or a completed `devin auth login`);
+`WINDSURF_API_KEY` alone is not sufficient for `devin -p` but is used by
+`devin acp`.
 
-7. **Which undocumented behaviors are safe enough to rely on?**
-   - `devin list --format json` returns a JSON array with `id` and `working_directory`.
-   - `devin acp` uses newline-delimited JSON-RPC and returns `sessionId` from `session/new`.
-   - Worktree branches use `goal-devin/<id>` under `.goal-wt/`.
+## 3. Live evidence captured
 
-8. **Which are too brittle?**
-   - Any assumption about the exact `sessions.db` schema beyond what `devin list` returns.
-   - Relying on `WINDSURF_API_KEY` for `devin -p` (it only works for ACP API calls).
-   - Parsing internal Rust strings for behavior (they are implementation details).
+| Document | What it contains |
+|----------|------------------|
+| `research/LIVE_PRINT_SESSION.md` | Real `devin -p` canary session with `--model swe-1-7`, edit, session id, diff, test status. |
+| `research/LIVE_SESSION_RESUME.md` | Resume of the same session id, context continuity, model/cwd preservation. |
+| `research/LIVE_HOOK_PROTOCOL.md` | Observation-only hooks, sanitized payload shapes for `PreToolUse`/`PostToolUse`/`run_subagent`/etc. |
+| `research/LIVE_SUBAGENT_BEHAVIOR.md` | `subagent_general`, `subagent_explore`, and a custom `reviewer` profile. |
+| `research/LIVE_NATIVE_TUI.md` | PTY-driven TUI capture: startup, input, `/exit`, terminal sequences, clean exit. |
 
-9. **What exact behavior must a Rust rewrite preserve?**
-   The black-box contract in `GOAL_DEVIN_BEHAVIOR_CONTRACT.md`: per-cwd state path, atomic state writes, exact `devin -p`/`devin -r` argv, `devin list` session resolution, worktree create/keep/remove rules, log delimiter format, exit codes, and env var defaults.
+## 4. Recommendation for next phase
 
-10. **What is the proposed first trial slice?**
-    Add `goal-devin ultra --script <file>` in Python with `agent()`, `parallel()`, `pipeline()`, `phase()`, `log()`, `budget`, `args`, a `Journal`, and a `CliRenderer`, running against the fake `devin` fixture. See `TRIAL_SLICE.md`.
+- Do not implement the full Ultra Code workflow or Rust rewrite yet.
+- Run the **native-integration trial** in Python first
+(`research/NATIVE_INTEGRATION_TRIAL.md`):
+  - `goal-devin start` launches `devin` with the user's terminal attached.
+  - A sidecar observes at least one hook event.
+  - A temporary custom subagent profile is created and cleaned up.
+  - Existing commands remain unchanged.
+- Defer the final Python-vs-Rust language decision until the trial proves the
+integration contract.
 
-11. **What evidence was captured live?**
-    - Installed `devin` v3000.1.27 and recorded binary metadata.
-    - Ran `devin --help`, all subcommand helps, `auth status`, `list --format json`, and TTY startup ANSI capture.
-    - Performed a full ACP `initialize` + `session/new` handshake over stdio with `WINDSURF_API_KEY`.
-    - Built and ran a fake `devin` to exercise `goal-devin goal`, `resume`, `status`, `logs`, and `version`.
-    - Captured `~/.config/devin/`, `~/.local/share/devin/cli/`, `~/.cache/devin/` filesystem layout and `sessions.db` schema.
+## 5. Remaining gaps
 
-12. **What could not be tested?**
-    - Real `devin -p` / `devin -r` due to login requirement.
-    - `session/prompt` via ACP due to token usage.
-    - Full interactive TUI, hooks, subagents, rate limits.
+- Rate-limit error shape and retry behavior: not triggered.
+- Exact `read_subagent` tool schema and background subagent parent notification.
+- Effective subagent model visibility (CLI does not expose it).
+- Full interactive TUI features such as model picker and subagent indicator
+  (only basic operation observed).
+- Long-term session behavior (compaction, large context, multi-turn TUI).
 
-13. **Were any credentials exposed?**
-    No. The `WINDSURF_API_KEY` value was never logged, printed, or committed. Only the environment variable name appears in the fake `devin` journal, which is gitignored.
+See `research/GAPS.md` for the full gap list.
 
-14. **Were any permanent user files modified?**
-    No. All experiments used isolated `HOME` directories under `.research-evidence/` and a disposable canary Git repository. The only real home change was the installation of `devin` itself, which is expected.
+## 6. Security / credential handling
 
-15. **Is the repository ready for the architecture-planning phase?**
-    Yes. The research package documents the current baseline, the public Devin seams, the ACP protocol, filesystem and terminal behavior, and a proposed trial slice. The remaining gaps are identified and do not block `ultra` implementation against a fake `devin`.
+- The `windsurf_api_key` secret was used only to populate the Devin CLI
+credentials file in isolated `HOME` directories. It was never printed, echoed,
+passed in argv, committed, or written into fixtures.
+- All live evidence and raw transcripts live in `.research-evidence/`, which
+is gitignored.
+- No authorization values, session transcripts, or account identifiers appear
+in committed research documents.

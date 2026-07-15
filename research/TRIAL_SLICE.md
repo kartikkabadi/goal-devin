@@ -1,5 +1,7 @@
 # Goal Devin — Proposed Trial Slice (Phase Next)
 
+> **SUPERSEDED.** This document proposed a Python `goal-devin ultra --script` dynamic-workflow DSL trial. The corrected product scope is in `research/PRODUCT_SCOPE.md` and the next implementation trial is described in `research/NATIVE_INTEGRATION_TRIAL.md`. Do not implement this slice.
+
 ## Goal
 
 Prove the `ultra` dynamic-workflow runtime end-to-end in **Python**, using the existing fake `devin` fixture, before committing to a full feature or a Rust rewrite.

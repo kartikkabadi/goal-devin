@@ -1,12 +1,17 @@
 # Devin CLI — ACP Protocol
 
-## Status
+## Evidence classification
 
-`devin acp` is a public, stable ACP (Agent Client Protocol) server over stdio. The observations below come from a live handshake and `session/new` call with an isolated `HOME` and `WINDSURF_API_KEY`.
+- **DOCUMENTED** — from the official Devin CLI public documentation.
+- **OBSERVED LIVE** — from a live `devin` session in this research phase.
+- **INFERRED** — deduced from other evidence but not directly observed.
+- **UNKNOWN** — not yet determined.
 
 ## Transport
 
-`devin acp` uses **newline-delimited JSON-RPC 2.0** over stdio, **not** LSP `Content-Length` framing. Each message is a single JSON object terminated by `\n`.
+`devin acp` uses **newline-delimited JSON-RPC 2.0** over stdio, **not** LSP
+`Content-Length` framing. Each message is a single JSON object terminated by
+`\n`.
 
 Incorrect framing (e.g. LSP `Content-Length` headers) produces:
 
@@ -104,13 +109,36 @@ Key takeaways:
   "id": 2,
   "result": {
     "sessionId": "humorous-impatiens",
-    "modes": { ... },
-    "configOptions": [ ... ]
+    "modes": { "currentModeId": "accept-edits", ... },
+    "configOptions": [
+      { "id": "mode", "name": "Session Mode", "type": "select", "currentValue": "accept-edits", ... },
+      { "id": "model", "name": "Model", "type": "select", "currentValue": "swe-1-7", "options": [ ... ] }
+    ]
   }
 }
 ```
 
-The session ID is a human-readable phrase (`<adjective>-<noun>`). The response also streams a `session/update` notification before the result with the initial config options (mode, model, etc.).
+The session ID is a human-readable phrase (`<adjective>-<noun>`). The response
+also streams a `session/update` notification before the result with the initial
+config options (mode, model, etc.).
+
+## Model list observed in ACP (OBSERVED LIVE)
+
+The `model` config option returned by `session/new` included identifiers such as:
+
+- `swe-1-7`, `swe-1-7-lightning`
+- `claude-opus-4-8-*` (medium/low/high/xhigh/max + fast variants)
+- `claude-sonnet-5-*`
+- `claude-5-fable-*`
+- `gpt-5-6-sol-*`, `gpt-5-6-luna-*`, `gpt-5-6-terra-*`
+- `gemini-3-5-flash-*`
+- `glm-5-2` (and `max`, `1m`, `none`, `none-1m` variants)
+- `kimi-k2-7`
+- `adaptive`
+
+This is the strongest evidence for the exact model identifiers accepted by the
+installed binary. The list should be treated as a snapshot; future versions may
+add or remove identifiers.
 
 ## Session update notifications
 
@@ -120,13 +148,17 @@ Before the `session/new` result, Devin sent `session/update` notifications:
 - `sessionUpdate: "current_mode_update"` — `accept-edits`.
 - `sessionUpdate: "available_commands_update"` — slash commands (`login`, `logout`, `status`, `workspace`, `add-dir`, `ask`, `compact`, `context`, `session-stats`, `bug`, `help`, `declarative-repo-setup`).
 
-This confirms ACP is the richer integration seam for model selection, mode changes, and command availability.
+This confirms ACP is the richer integration seam for model selection, mode
+changes, and command availability.
 
 ## ACP vs. CLI `devin -p`
 
-- `devin acp` can create a session (`session/new`) without interactive login, using `WINDSURF_API_KEY` for API calls.
-- `devin -p` (single-turn print mode) requires stored credentials and refuses to run headless.
-- This suggests `devin -p` is not a thin wrapper over ACP; it has its own auth/UI path.
+- `devin acp` can create a session (`session/new`) without interactive login,
+  using `WINDSURF_API_KEY` for API calls.
+- `devin -p` (single-turn print mode) requires stored credentials and refuses
+  to run headless.
+- This suggests `devin -p` is not a thin wrapper over ACP; it has its own
+  auth/UI path.
 
 ## Sufficient for Goal Devin?
 
@@ -141,7 +173,8 @@ This confirms ACP is the richer integration seam for model selection, mode chang
 
 ## Proposed ACP integration for Goal Devin (future)
 
-Rather than wrapping `devin -p` and guessing session IDs, a Rust Goal Devin could:
+Rather than wrapping `devin -p` and guessing session IDs, a Goal Devin sidecar
+could:
 
 1. Spawn `devin acp` as a long-lived subprocess.
 2. Send `initialize` and `session/new`.
@@ -149,7 +182,9 @@ Rather than wrapping `devin -p` and guessing session IDs, a Rust Goal Devin coul
 4. Listen to `session/update` for progress, tool calls, and final answer.
 5. Send `session/cancel` on `Ctrl+C`.
 
-This would replace the brittle `devin -p` / `devin list` loop. However, it requires keeping `devin acp` running, handling JSON-RPC framing, and dealing with auth.
+This would replace the brittle `devin -p` / `devin list` loop. However, it
+requires keeping `devin acp` running, handling JSON-RPC framing, and dealing
+with auth.
 
 ## Not tested
 
