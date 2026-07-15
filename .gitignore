@@ -38,3 +38,6 @@ htmlcov/
 # goal-devin local state (never commit)
 .goal-devin/
 .goal-wt/
+
+# research phase raw evidence (sanitized docs live under research/)
+.research-evidence/
