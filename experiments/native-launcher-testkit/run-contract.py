@@ -244,10 +244,15 @@ def run_candidate(
     env = _prepare_isolated_env(runtime_root, env)
 
     if args.existing_hooks:
-        existing = load_json(Path(args.existing_hooks))
-        expected_cmd = _first_command(existing)
-        if expected_cmd:
-            env["GOAL_DEVIN_EXPECTED_EXISTING_HOOK_COMMAND"] = expected_cmd
+        try:
+            existing = load_json(Path(args.existing_hooks))
+            expected_cmd = _first_command(existing)
+            if expected_cmd:
+                env["GOAL_DEVIN_EXPECTED_EXISTING_HOOK_COMMAND"] = expected_cmd
+        except (json.JSONDecodeError, ValueError):
+            # The candidate is responsible for validating the existing hooks file.
+            # If it is malformed, the runner cannot extract an expected command.
+            pass
 
     if args.process_overlap:
         env["GOAL_DEVIN_BARRIER"] = "1"
@@ -352,6 +357,81 @@ def _no_outside_writes(base_dir: Path, runtime_root: Path, errors: list[str]) ->
                 errors.append(f"File or directory outside runtime root: {resolved}")
 
 
+def _is_owned(
+    path: Path,
+    owned_paths: set[Path],
+    owned_roots: list[Path],
+    owned_prefixes: list[str],
+) -> bool:
+    resolved = path.resolve()
+    if resolved in owned_paths:
+        return True
+    for root in owned_roots:
+        try:
+            if resolved.is_relative_to(root):
+                return True
+        except ValueError:
+            pass
+    s = str(resolved)
+    for prefix in owned_prefixes:
+        if s.startswith(prefix):
+            return True
+    return False
+
+
+def _check_ownership(
+    run_dir: Path,
+    canary: Path,
+    manifest: dict[str, Any],
+    canary_fixture: Path | None,
+    existing_hooks_path: Path | None,
+    existing_bytes: bytes | None,
+    errors: list[str],
+) -> None:
+    """Verify every generated artifact is declared in the manifest and pre-existing
+    paths are never marked as owned."""
+    owned_paths = {Path(p).resolve() for p in manifest.get("owned_paths", [])}
+    owned_roots = [Path(p).resolve() for p in manifest.get("owned_roots", [])]
+    owned_prefixes = manifest.get("owned_prefixes", [])
+
+    pre_existing: set[Path] = set()
+    if canary_fixture and canary_fixture.is_dir():
+        for src in canary_fixture.rglob("*"):
+            if src.is_file():
+                rel = src.relative_to(canary_fixture)
+                pre_existing.add((canary / rel).resolve())
+    if existing_hooks_path:
+        pre_existing.add((canary / ".devin" / "hooks.v1.json").resolve())
+
+    if run_dir.is_dir():
+        for path in run_dir.rglob("*"):
+            if path.is_file():
+                if not _is_owned(path, owned_paths, owned_roots, owned_prefixes):
+                    errors.append(f"Generated runtime file not owned: {path.resolve()}")
+
+    devin_dir = canary / ".devin"
+    if devin_dir.is_dir():
+        for path in devin_dir.rglob("*"):
+            if path.is_file():
+                resolved = path.resolve()
+                if resolved in pre_existing:
+                    continue
+                if not _is_owned(resolved, owned_paths, owned_roots, owned_prefixes):
+                    errors.append(f"Generated canary file not owned: {resolved}")
+
+    profile_path = Path(manifest["profile_path"]).resolve()
+    if not _is_owned(profile_path, owned_paths, owned_roots, owned_prefixes):
+        errors.append("Generated profile path not declared in manifest")
+    if existing_bytes is None:
+        hooks_path = (canary / ".devin" / "hooks.v1.json").resolve()
+        if hooks_path not in owned_paths:
+            errors.append("Temporary project hook not declared in manifest owned_paths")
+
+    for pre in pre_existing:
+        if _is_owned(pre, owned_paths, owned_roots, owned_prefixes):
+            errors.append(f"Pre-existing/user-owned path marked as owned: {pre}")
+
+
 def _check_file_modes(run_dir: Path, errors: list[str]) -> None:
     check_directory_mode(run_dir, 0o700, "run_dir", errors)
     events_dir = run_dir / "events"
@@ -405,19 +485,22 @@ def run_contract(args: argparse.Namespace) -> list[str]:
     else:
         base_dir = runtime_root
 
+    canary_fixture = Path(args.canary_fixture).resolve() if args.canary_fixture else None
+    existing_hooks_path = Path(args.existing_hooks).resolve() if args.existing_hooks else None
+
     canary = runtime_root / "canary"
-    if args.canary_fixture:
+    if canary_fixture:
         if canary.exists():
             shutil.rmtree(canary)
-        shutil.copytree(args.canary_fixture, canary, symlinks=True)
+        shutil.copytree(canary_fixture, canary, symlinks=True)
     else:
         canary.mkdir(parents=True, exist_ok=True)
 
     existing_bytes: bytes | None = None
-    if args.existing_hooks:
+    if existing_hooks_path:
         hooks_file = canary / ".devin" / "hooks.v1.json"
         hooks_file.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(args.existing_hooks, hooks_file)
+        shutil.copyfile(existing_hooks_path, hooks_file)
         existing_bytes = hooks_file.read_bytes()
 
     try:
@@ -475,6 +558,15 @@ def run_contract(args: argparse.Namespace) -> list[str]:
     )
 
     _check_file_modes(run_dir, errors)
+    _check_ownership(
+        run_dir,
+        canary,
+        manifest,
+        canary_fixture,
+        existing_hooks_path,
+        existing_bytes,
+        errors,
+    )
 
     if manifest.get("model") != args.model:
         errors.append(f"manifest model mismatch: {manifest.get('model')}")

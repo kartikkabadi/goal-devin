@@ -173,6 +173,39 @@ def test_event_schema_rejection_for_invalid_fixture():
     assert errors
 
 
+def test_schema_conformance_corpus():
+    """Run the shared schema conformance corpus through both validators."""
+    from native_launcher.schema import (
+        validate as runtime_validate,
+        validate_file as runtime_validate_file,
+    )
+
+    corpus_path = TESTKIT / "fixtures" / "schema-conformance" / "cases.json"
+    corpus = json.loads(corpus_path.read_text(encoding="utf-8"))
+
+    malformed_schema = corpus_path.parent / corpus["malformed_schema_file"]
+    with pytest.raises(json.JSONDecodeError):
+        schema_validator.validate_file({}, malformed_schema)
+    with pytest.raises(json.JSONDecodeError):
+        runtime_validate_file({}, malformed_schema)
+
+    for case in corpus["cases"]:
+        schema = case["schema"]
+        for value in case["valid"]:
+            shared = schema_validator.validate(value, schema)
+            runtime = runtime_validate(value, schema)
+            assert shared == runtime, (
+                f"{case['name']} valid mismatch for {value!r}: {shared} vs {runtime}"
+            )
+        for value in case["invalid"]:
+            shared = schema_validator.validate(value, schema)
+            runtime = runtime_validate(value, schema)
+            assert shared == runtime, (
+                f"{case['name']} invalid mismatch for {value!r}: {shared} vs {runtime}"
+            )
+            assert shared, f"{case['name']} should reject {value!r}"
+
+
 def test_sidecar_event_consumption(contract_pass):
     summary = json.loads((contract_pass / "summary.json").read_text())
     assert summary["total_events"] >= 1
@@ -622,6 +655,79 @@ def test_runtime_root_outside_base_dir_rejected():
         assert "runtime-root" in result.stderr.lower()
     finally:
         shutil.rmtree(base_dir, ignore_errors=True)
+        shutil.rmtree(runtime_root.parent, ignore_errors=True)
+
+
+@pytest.mark.parametrize(
+    "hooks_content",
+    [
+        "{ not valid json",
+        "[]",
+        '"scalar"',
+        '{"PreToolUse": {"matcher": "", "hooks": []}}',
+        '{"PreToolUse": "not-a-list"}',
+    ],
+    ids=[
+        "malformed_json",
+        "top_level_array",
+        "top_level_scalar",
+        "non_list_entry",
+        "non_list_event",
+    ],
+)
+def test_malformed_hooks_in_canary_fixture_rejected(hooks_content):
+    fixture = Path(tempfile.mkdtemp(prefix="goal-devin-malformed-hooks-"))
+    shutil.copytree(CANARY_FIXTURE, fixture, dirs_exist_ok=True)
+    hooks_file = fixture / ".devin" / "hooks.v1.json"
+    hooks_file.parent.mkdir(parents=True, exist_ok=True)
+    hooks_file.write_text(hooks_content, encoding="utf-8")
+    original_mode = stat.S_IMODE(hooks_file.stat().st_mode)
+    original_bytes = hooks_file.read_bytes()
+
+    try:
+        rc, errors, runtime_root = _run_contract(canary_fixture=fixture, keep=True)
+        assert rc != 0, "expected candidate to reject malformed existing hooks"
+        assert any(
+            "json" in e.lower() or "object" in e.lower() or "list" in e.lower() for e in errors
+        )
+        # Source fixture must be preserved exactly.
+        assert hooks_file.read_bytes() == original_bytes
+        assert stat.S_IMODE(hooks_file.stat().st_mode) == original_mode
+        canary = runtime_root / "canary"
+        assert not (canary / ".devin" / "agents").exists(), "profile must not be created"
+    finally:
+        shutil.rmtree(fixture, ignore_errors=True)
+        shutil.rmtree(runtime_root.parent, ignore_errors=True)
+
+
+@pytest.mark.parametrize(
+    "hooks_content",
+    [
+        "{ not valid json",
+        "[]",
+        '{"PreToolUse": "not-a-list"}',
+    ],
+    ids=["malformed_json", "top_level_array", "non_list_event"],
+)
+def test_malformed_existing_hooks_argument_rejected(hooks_content):
+    tmp_hooks = Path(tempfile.mktemp(prefix="malformed-hooks-", suffix=".json"))
+    tmp_hooks.write_text(hooks_content, encoding="utf-8")
+    original_mode = stat.S_IMODE(tmp_hooks.stat().st_mode)
+    original_bytes = tmp_hooks.read_bytes()
+
+    try:
+        rc, errors, runtime_root = _run_contract(existing_hooks=tmp_hooks, keep=True)
+        assert rc != 0, "expected candidate to reject malformed --existing-hooks"
+        assert any(
+            "json" in e.lower() or "object" in e.lower() or "list" in e.lower() for e in errors
+        )
+        # Source file must be preserved exactly.
+        assert tmp_hooks.read_bytes() == original_bytes
+        assert stat.S_IMODE(tmp_hooks.stat().st_mode) == original_mode
+        canary = runtime_root / "canary"
+        assert not (canary / ".devin" / "agents").exists(), "profile must not be created"
+    finally:
+        tmp_hooks.unlink(missing_ok=True)
         shutil.rmtree(runtime_root.parent, ignore_errors=True)
 
 

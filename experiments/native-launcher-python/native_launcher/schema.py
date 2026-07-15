@@ -1,117 +1,105 @@
-"""Minimal runtime JSON-schema validator (draft-2020-12 subset)."""
+"""Minimal runtime JSON-schema validator (draft-2020-12 subset).
+
+Behavior is intentionally aligned with the shared testkit validator so that the
+same conformance corpus can be run against the Python candidate and, later, the
+Rust candidate.
+"""
 
 import json
 from pathlib import Path
 from typing import Any
 
 
-def _check_type(value: Any, typespec: str | list[str]) -> bool:
-    if isinstance(typespec, list):
-        return any(_check_type(value, t) for t in typespec)
-    type_map = {
-        "object": dict,
-        "array": list,
-        "string": str,
-        "integer": int,
-        "number": (int, float),
-        "boolean": bool,
-        "null": type(None),
-    }
-    py_type = type_map.get(typespec)
-    if py_type is None:
-        return True
-    return isinstance(value, py_type)
+def _type_match(value: Any, expected: str | list[str]) -> bool:
+    """Return True if *value* matches the JSON Schema *expected* type(s)."""
+    if isinstance(expected, list):
+        return any(_type_match(value, t) for t in expected)
+    if expected == "object":
+        return isinstance(value, dict)
+    if expected == "array":
+        return isinstance(value, list)
+    if expected == "string":
+        return isinstance(value, str)
+    if expected == "integer":
+        return isinstance(value, int) and not isinstance(value, bool)
+    if expected == "number":
+        return isinstance(value, (int, float)) and not isinstance(value, bool)
+    if expected == "boolean":
+        return isinstance(value, bool)
+    if expected == "null":
+        return value is None
+    return True
 
 
-def _validate(value: Any, schema: Any, path: str = "") -> list[str]:
+def _validate(value: Any, schema: Any, path: str) -> list[str]:
+    """Validate *value* against *schema* at *path*."""
     errors: list[str] = []
-    if isinstance(schema, bool):
-        if schema is False:
-            errors.append(f"{path}: additional properties not allowed")
+    if not isinstance(schema, dict):
         return errors
 
-    if "const" in schema:
-        if value != schema["const"]:
-            errors.append(f"{path}: expected {schema['const']!r}, got {value!r}")
+    if "type" in schema and not _type_match(value, schema["type"]):
+        expected = schema["type"]
+        got = type(value).__name__
+        errors.append(f"{path}: expected {expected}, got {got}")
         return errors
 
-    if "enum" in schema:
-        if value not in schema["enum"]:
-            errors.append(f"{path}: expected one of {schema['enum']}, got {value!r}")
-        return errors
+    if "enum" in schema and value not in schema["enum"]:
+        errors.append(f"{path}: expected one of {schema['enum']}")
 
-    if "type" in schema:
-        if not _check_type(value, schema["type"]):
-            errors.append(f"{path}: type mismatch, expected {schema['type']}")
-            return errors
+    if "const" in schema and value != schema["const"]:
+        errors.append(f"{path}: expected {schema['const']}")
+
+    if "minLength" in schema and isinstance(value, str) and len(value) < schema["minLength"]:
+        errors.append(f"{path}: length < {schema['minLength']}")
+
+    if (
+        "minimum" in schema
+        and isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and value < schema["minimum"]
+    ):
+        errors.append(f"{path}: value < {schema['minimum']}")
+
+    if (
+        "maximum" in schema
+        and isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and value > schema["maximum"]
+    ):
+        errors.append(f"{path}: value > {schema['maximum']}")
 
     if isinstance(value, dict):
-        if "minProperties" in schema and len(value) < schema["minProperties"]:
-            errors.append(f"{path}: too few properties")
-        if "maxProperties" in schema and len(value) > schema["maxProperties"]:
-            errors.append(f"{path}: too many properties")
         if "required" in schema:
             for key in schema["required"]:
                 if key not in value:
-                    errors.append(f"{path}: missing required property {key!r}")
-        allowed_props = set()
-        prop_schemas = {}
-        if "properties" in schema:
-            allowed_props.update(schema["properties"].keys())
-            prop_schemas.update(schema["properties"])
-        if "patternProperties" in schema:
-            import re
+                    errors.append(f"{path}: missing required key {key!r}")
 
-            for pattern in schema["patternProperties"].keys():
-                allowed_props.update(k for k in value if re.search(pattern, k))
-                prop_schemas.update(
-                    {
-                        k: schema["patternProperties"][pattern]
-                        for k in value
-                        if re.search(pattern, k)
-                    }
-                )
-        if "additionalProperties" in schema:
-            add = schema["additionalProperties"]
-            if add is False:
-                for key in value:
-                    if key not in allowed_props:
-                        errors.append(f"{path}: additional property {key!r} not allowed")
-            elif isinstance(add, dict):
-                for key in value:
-                    if key not in allowed_props:
-                        errors.extend(_validate(value[key], add, f"{path}.{key}"))
-        for key, val in value.items():
-            if key in prop_schemas:
-                errors.extend(_validate(val, prop_schemas[key], f"{path}.{key}"))
+        properties = schema.get("properties", {})
+        for key, sub_schema in properties.items():
+            if key in value:
+                errors.extend(_validate(value[key], sub_schema, f"{path}.{key}"))
 
-    if isinstance(value, list):
-        if "minItems" in schema and len(value) < schema["minItems"]:
-            errors.append(f"{path}: too few items")
-        if "maxItems" in schema and len(value) > schema["maxItems"]:
-            errors.append(f"{path}: too many items")
-        if "items" in schema:
-            for i, item in enumerate(value):
-                errors.extend(_validate(item, schema["items"], f"{path}[{i}]"))
+        additional = schema.get("additionalProperties", True)
+        if additional is False:
+            allowed = set(properties.keys())
+            for key in value:
+                if key not in allowed:
+                    errors.append(f"{path}: additional property {key!r} not allowed")
+        elif isinstance(additional, dict):
+            for key in value:
+                if key not in properties:
+                    errors.extend(_validate(value[key], additional, f"{path}.{key}"))
 
-    if isinstance(value, str):
-        if "minLength" in schema and len(value) < schema["minLength"]:
-            errors.append(f"{path}: string too short")
-        if "maxLength" in schema and len(value) > schema["maxLength"]:
-            errors.append(f"{path}: string too long")
-
-    if isinstance(value, (int, float)):
-        if "minimum" in schema and value < schema["minimum"]:
-            errors.append(f"{path}: value below minimum")
-        if "maximum" in schema and value > schema["maximum"]:
-            errors.append(f"{path}: value above maximum")
+    if isinstance(value, list) and "items" in schema:
+        for i, item in enumerate(value):
+            errors.extend(_validate(item, schema["items"], f"{path}[{i}]"))
 
     return errors
 
 
 def validate(value: Any, schema: Any) -> list[str]:
     """Validate *value* against *schema*. Returns a list of error messages."""
-    return _validate(value, schema)
+    return _validate(value, schema, "$")
 
 
 def validate_file(value: Any, schema_path: Path) -> list[str]:

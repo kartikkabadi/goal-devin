@@ -15,7 +15,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--permission-mode",
         required=True,
-        help="Permission mode to pass through to Devin (e.g. accept-edits).",
+        help="Permission mode to pass through to Devin (e.g. accept-edits in the v3000.1.27 fixture).",
     )
     parser.add_argument(
         "--devin-bin", required=True, help="Path to the devin executable to launch."
@@ -38,7 +38,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--existing-hooks",
         default=None,
-        help="Path to an existing .devin/hooks.json fixture to pre-seed and restore.",
+        help="Path to an existing .devin/hooks.v1.json fixture to pre-seed, merge, and restore.",
     )
     parser.add_argument(
         "--keep-canary",

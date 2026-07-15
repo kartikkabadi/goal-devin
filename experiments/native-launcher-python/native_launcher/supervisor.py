@@ -30,6 +30,40 @@ def _validate_permission_mode(mode: str) -> None:
         raise ValueError("permission-mode must be a one-line identifier")
 
 
+def _validate_existing_hooks(hooks_file: Path) -> dict[str, Any]:
+    """Parse and validate an existing hooks.v1.json file before any mutation."""
+    try:
+        config = json.loads(hooks_file.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        raise ValueError(f"Existing hooks file is not valid JSON: {hooks_file}: {exc}") from exc
+    if not isinstance(config, dict):
+        raise ValueError(f"Existing hooks file must be a JSON object: {hooks_file}")
+    for key, entries in config.items():
+        if not isinstance(entries, list):
+            raise ValueError(
+                f"Existing hooks event {key!r} must be a list, got {type(entries).__name__}"
+            )
+        for i, entry in enumerate(entries):
+            if not isinstance(entry, dict):
+                raise ValueError(
+                    f"Existing hooks event {key}[{i}] must be an object, got {type(entry).__name__}"
+                )
+            matcher = entry.get("matcher")
+            if matcher is not None and not isinstance(matcher, str):
+                raise ValueError(f"Existing hooks event {key}[{i}].matcher must be a string")
+            hooks = entry.get("hooks", [])
+            if not isinstance(hooks, list):
+                raise ValueError(
+                    f"Existing hooks event {key}[{i}].hooks must be a list, got {type(hooks).__name__}"
+                )
+            for j, h in enumerate(hooks):
+                if not isinstance(h, dict):
+                    raise ValueError(
+                        f"Existing hooks event {key}[{i}].hooks[{j}] must be an object"
+                    )
+    return config
+
+
 def _lifecycle_log(path: Path | None, label: str) -> None:
     if path is None:
         return
@@ -148,10 +182,7 @@ class Supervisor:
         if hooks_file.exists():
             self.original_hooks_bytes = hooks_file.read_bytes()
             self.original_hooks_mode = stat.S_IMODE(hooks_file.stat().st_mode)
-            try:
-                existing_config = json.loads(self.original_hooks_bytes.decode("utf-8"))
-            except (json.JSONDecodeError, UnicodeDecodeError):
-                existing_config = {}
+            existing_config = json.loads(self.original_hooks_bytes.decode("utf-8"))
         else:
             existing_config = {}
 
@@ -214,6 +245,11 @@ class Supervisor:
                 raise ValueError("canary hooks.v1.json path contains a symlink")
             shutil.copyfile(self.existing_hooks, dst)
             os.chmod(dst, stat.S_IMODE(self.existing_hooks.stat().st_mode))
+            _validate_existing_hooks(dst)
+        else:
+            hooks_file = self.canary / ".devin" / "hooks.v1.json"
+            if hooks_file.exists():
+                _validate_existing_hooks(hooks_file)
 
     def _start_sidecar(self) -> None:
         candidate_dir = _candidate_dir()
@@ -316,10 +352,13 @@ class Supervisor:
             devin_bin=self.devin_bin,
             canary=self.canary,
             hook_command=hook_command,
+            hook_path=self.hook_path,
+            hook_owned=self.existing_hooks is None,
             profile_id=self.profile_id,
             profile_path=self.profile_path,
             events_dir=self.events_dir,
             summary_path=self.summary_path,
+            lifecycle_log_path=self.lifecycle_path,
         )
 
         self._copy_event_schema()

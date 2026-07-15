@@ -7,14 +7,23 @@ launcher candidate. It is an experiment; it does **not** install the production
 ## Entry point
 
 ```bash
+BASE=$(mktemp -d)
 experiments/native-launcher-python/goal-devin-dev \
   --model swe-1-7 \
   --permission-mode accept-edits \
   --devin-bin <path-to-fake-devin> \
   --contract-dir experiments/native-launcher-testkit \
   --runtime-root "$BASE/runtime" \
-  --base-dir "$BASE"
+  --canary "$BASE/canary"
 ```
+
+`accept-edits` is the value observed in the v3000.1.27 `fake-devin` fixture; it is
+used here as an example permission mode, not as a claim that it is a current or
+universal Devin enum value.
+
+`--base-dir` belongs to the shared runner (`run-contract.py`), not to the
+candidate. The candidate only needs `--runtime-root` and a canary directory
+inside it.
 
 `--runtime-root` must be inside `--base-dir` so the outside-write oracle is
 meaningful. Optional flags:
@@ -72,7 +81,10 @@ experiments/native-launcher-python/
 
 - The supervisor creates a private runtime directory with mode `0700`.
 - The canary and all generated artifacts live under the supplied runtime root.
-- No user or project Devin configuration is copied or merged.
+- No complete user or project Devin configuration is copied or merged. The
+candidate only reads or temporarily merges the standalone `.devin/hooks.v1.json`
+project hook source; any existing hook file is restored byte-for-byte after the
+run.
 - `hook.py` extracts only approved event fields and never persists raw prompts,
 commands, output, repository paths, session IDs, credentials, or environment
 dumps.
@@ -93,6 +105,9 @@ stdio, and clean up generated artifacts.
   by `exec` (a negative-control candidate that execs fake `devin` is rejected).
 - All runtime artifacts have explicit expected file and directory modes;
   generated `AGENT.md` is mode `0600`.
+- Existing `.devin/hooks.v1.json` fixtures are parsed and validated before any
+  project mutation; malformed JSON, non-object top-level, and non-list event values
+  are rejected without creating the generated profile or starting the sidecar/child.
 - Existing hook fixtures are byte- and mode-preserved using `.devin/hooks.v1.json`
   only; `.devin/hooks.json` is never used as the standalone source.
 - `model` and `permission-mode` are validated as one-line identifiers before YAML
@@ -105,6 +120,9 @@ stdio, and clean up generated artifacts.
 - The outside-write oracle is self-consistent: `--runtime-root` must be inside
   `--base-dir`; a negative-control candidate that writes a sibling file under the
   base is rejected.
+- The manifest declares every generated artifact with `owned_paths`, `owned_roots`,
+  and `owned_prefixes`; the runner rejects any generated file not covered by the
+  manifest and asserts that pre-existing/user-owned paths are never marked owned.
 
 ## What is not proven
 

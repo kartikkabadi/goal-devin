@@ -12,7 +12,8 @@ candidate (R1A) and the future Rust candidate (R1B).
   network access.
 - `run-contract.py` — shared happy-path contract runner.
 - `expected/` — JSON schemas for the manifest, event, and summary artifacts.
-- `fixtures/` — canary repo fixture and an existing-hooks fixture.
+- `fixtures/` — canary repo fixture, an existing-hooks fixture, and a language-neutral
+  schema conformance corpus used by both candidates.
 
 ## Running the contract
 
@@ -38,7 +39,9 @@ observed supervisor, sidecar, and child PIDs alive simultaneously.
 - The testkit creates a fresh runtime root and canary for every run.
 - The candidate must not read, write, or execute outside the runtime root and
 disposable canary.
-- The candidate must not copy or merge the user's Devin configuration.
+- The candidate must not copy or merge the user's complete Devin configuration. It
+  may only read or temporarily merge the standalone `.devin/hooks.v1.json` project
+  hook source and must restore it byte-for-byte.
 - `fake-devin` deliberately records no environment variable keys to avoid
 leaking secret names; it does not access the network.
 - `--runtime-root` is required to be inside `--base-dir` so the outside-write
@@ -59,12 +62,18 @@ The contract verifies:
 - exact-byte and exact-mode restoration of existing hook fixtures using `.devin/hooks.v1.json`;
 - profile cleanup, TTY inheritance, and explicit file modes on all artifacts;
 - schema validity of manifest, event, and summary artifacts;
+- language-neutral schema conformance corpus parity between the shared validator
+  and the candidate validator;
+- manifest ownership contract (`owned_paths`/`owned_roots`/`owned_prefixes`);
 - event schema validation at candidate startup and fail-closed sidecar behavior when
   the schema is missing or invalid;
+- malformed/incompatible `.devin/hooks.v1.json` rejection without project mutation;
 - symlink-escape rejection for `.devin`, `.devin/agents`, `.devin/hooks.v1.json`, and
   the generated profile path before mutation;
 - outside-write rejection: `--runtime-root` must be inside `--base-dir`, and no files
-  outside the allowlist are permitted.
+  outside the allowlist are permitted;
+- ownership rejection: any generated artifact not declared in the manifest fails the
+  contract, and pre-existing/user-owned paths must never be marked as owned.
 
 ## What is not proven
 
