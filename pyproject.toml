@@ -42,3 +42,7 @@ dev = [
 
 [tool.ruff]
 line-length = 100
+
+[tool.pytest.ini_options]
+pythonpath = ["src", "experiments/native-launcher-python/src", "experiments/native-launcher-testkit"]
+testpaths = ["tests", "experiments/native-launcher-python/tests"]
