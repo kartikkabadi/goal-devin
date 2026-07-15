@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": ["schema_version", "run_id", "total_events", "consumed_event_ids", "tools", "profiles", "last_event"],
+  "properties": {
+    "schema_version": { "type": "integer", "const": 1 },
+    "run_id": { "type": "string" },
+    "total_events": { "type": "integer", "minimum": 0 },
+    "consumed_event_ids": { "type": "array", "items": { "type": "string" } },
+    "tools": { "type": "object" },
+    "profiles": { "type": "object" },
+    "last_event": {
+      "type": "object",
+      "required": ["tool_name", "profile", "is_background", "success", "observed_at"],
+      "properties": {
+        "tool_name": { "type": "string" },
+        "profile": { "type": "string" },
+        "is_background": { "type": "boolean" },
+        "success": { "type": ["boolean", "null"] },
+        "observed_at": { "type": "string" }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

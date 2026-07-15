@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": ["schema_version", "event", "tool_name", "profile", "is_background", "success", "observed_at"],
+  "properties": {
+    "schema_version": { "type": "integer", "const": 1 },
+    "event": { "type": "string", "enum": ["PreToolUse", "PostToolUse", "SessionStart", "SessionEnd"] },
+    "tool_name": { "type": "string" },
+    "profile": { "type": "string" },
+    "is_background": { "type": "boolean" },
+    "success": { "type": ["boolean", "null"] },
+    "observed_at": { "type": "string" }
+  },
+  "additionalProperties": false
+}

@@ -1,0 +1,14 @@
+#!/usr/bin/env python3
+"""Candidate-local executable for the Python native launcher."""
+
+import os
+import sys
+
+
+if __name__ == "__main__":
+    candidate_dir = os.path.dirname(os.path.abspath(__file__))
+    if candidate_dir not in sys.path:
+        sys.path.insert(0, candidate_dir)
+    from native_launcher.cli import main
+
+    sys.exit(main())
