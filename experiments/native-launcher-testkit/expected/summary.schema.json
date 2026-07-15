@@ -10,14 +10,14 @@
     "tools": { "type": "object" },
     "profiles": { "type": "object" },
     "last_event": {
-      "type": "object",
+      "type": ["object", "null"],
       "required": ["tool_name", "profile", "is_background", "success", "observed_at"],
       "properties": {
-        "tool_name": { "type": "string" },
-        "profile": { "type": "string" },
-        "is_background": { "type": "boolean" },
+        "tool_name": { "type": ["string", "null"] },
+        "profile": { "type": ["string", "null"] },
+        "is_background": { "type": ["boolean", "null"] },
         "success": { "type": ["boolean", "null"] },
-        "observed_at": { "type": "string" }
+        "observed_at": { "type": ["string", "null"] }
       },
       "additionalProperties": false
     }

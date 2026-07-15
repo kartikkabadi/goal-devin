@@ -48,6 +48,28 @@ def _record(runtime_dir: Path, data: dict) -> None:
     runtime_dir.mkdir(parents=True, exist_ok=True)
     record_path = runtime_dir / "fake-devin.record.json"
     record_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    os.chmod(record_path, 0o600)
+
+
+def _write_pid(runtime_dir: Path | None) -> None:
+    if runtime_dir is None:
+        return
+    pid_path = runtime_dir / "child.pid"
+    pid_path.write_text(str(os.getpid()), encoding="utf-8")
+    os.chmod(pid_path, 0o600)
+
+
+def _barrier_wait(runtime_dir: Path | None, timeout: float = 30.0) -> None:
+    if runtime_dir is None:
+        return
+    if not os.environ.get("GOAL_DEVIN_BARRIER"):
+        return
+    continue_path = runtime_dir / "continue"
+    deadline = time.monotonic() + timeout
+    while not continue_path.exists():
+        if time.monotonic() > deadline:
+            raise RuntimeError("Barrier release not received within timeout")
+        time.sleep(0.01)
 
 
 def _find_profile(canary: Path) -> tuple[Path, dict] | None:
@@ -158,6 +180,11 @@ def _verify_profile(canary: Path, expected_model: str) -> str:
     unknown = set(front.keys()) - DOCUMENTED_FIELDS
     if unknown:
         raise RuntimeError(f"Profile contains unsupported frontmatter keys: {unknown}")
+    profile_id = path.parent.name
+    if front.get("name") != profile_id:
+        raise RuntimeError(
+            f"Profile name mismatch: directory {profile_id!r} != frontmatter {front.get('name')!r}"
+        )
     if front.get("model") != expected_model:
         raise RuntimeError(
             f"Profile model mismatch: expected {expected_model}, got {front.get('model')}"
@@ -169,7 +196,7 @@ def _verify_profile(canary: Path, expected_model: str) -> str:
     deny = permissions.get("deny", []) if isinstance(permissions, dict) else []
     if set(deny) != {"write", "edit"}:
         raise RuntimeError(f"Profile does not deny write/edit: {deny}")
-    return path.parent.name
+    return profile_id
 
 
 def _find_hook_command(canary: Path) -> list[str] | None:
@@ -248,6 +275,38 @@ def _cmd_help() -> int:
     return 0
 
 
+def _parse_native_argv(argv: list[str]) -> tuple[str, str]:
+    """Parse the native-mode argv strictly.
+
+    Allowed form:
+        --model <model> --permission-mode <mode>
+    No duplicates, no unknown flags, no positional arguments, no print flags.
+    """
+    allowed_flags = {"--model", "--permission-mode"}
+    forbidden_flags = {"-p", "--print"}
+    seen: set[str] = set()
+    values: dict[str, str] = {}
+    idx = 0
+    while idx < len(argv):
+        arg = argv[idx]
+        if arg in forbidden_flags:
+            raise RuntimeError(f"Print mode flag is forbidden: {arg}")
+        if arg not in allowed_flags:
+            raise RuntimeError(f"Unexpected argument in native-mode argv: {arg}")
+        if arg in seen:
+            raise RuntimeError(f"Duplicate flag in native-mode argv: {arg}")
+        seen.add(arg)
+        if idx + 1 >= len(argv):
+            raise RuntimeError(f"Missing value for flag: {arg}")
+        values[arg] = argv[idx + 1]
+        idx += 2
+    if "--model" not in values:
+        raise RuntimeError("Missing required flag --model")
+    if "--permission-mode" not in values:
+        raise RuntimeError("Missing required flag --permission-mode")
+    return values["--model"], values["--permission-mode"]
+
+
 def _main() -> int:
     argv = sys.argv[1:]
     if not argv:
@@ -266,19 +325,7 @@ def _main() -> int:
     runtime_dir = _load_runtime_dir()
     canary = Path.cwd().resolve()
 
-    model = None
-    permission_mode = None
-    idx = 0
-    while idx < len(argv):
-        arg = argv[idx]
-        if arg == "--model" and idx + 1 < len(argv):
-            model = argv[idx + 1]
-            idx += 2
-        elif arg == "--permission-mode" and idx + 1 < len(argv):
-            permission_mode = argv[idx + 1]
-            idx += 2
-        else:
-            idx += 1
+    model, permission_mode = _parse_native_argv(argv)
 
     profile_id = _verify_profile(canary, model)
     hook_command = _find_hook_command(canary)
@@ -286,7 +333,11 @@ def _main() -> int:
         raise RuntimeError("Observation hook not installed in canary")
 
     _verify_existing_hooks_preserved(canary)
+    _write_pid(runtime_dir)
     _lifecycle_log("child_start")
+
+    # Pause for the runner to observe process overlap, then continue.
+    _barrier_wait(runtime_dir)
 
     hook_rc = _invoke_hook(hook_command, profile_id)
     if hook_rc != 0:
@@ -300,7 +351,9 @@ def _main() -> int:
         summary_path = runtime_dir / "summary.json"
         if summary_path.exists():
             try:
-                sidecar_total_events = json.loads(summary_path.read_text(encoding="utf-8")).get("total_events", 0)
+                sidecar_total_events = json.loads(
+                    summary_path.read_text(encoding="utf-8")
+                ).get("total_events", 0)
             except (json.JSONDecodeError, OSError):
                 pass
 

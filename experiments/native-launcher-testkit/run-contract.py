@@ -10,6 +10,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 from typing import Any
 
@@ -44,6 +45,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--permission-mode", default=DEFAULT_PERMISSION, help="Permission mode to request."
     )
     parser.add_argument(
+        "--contract-dir",
+        default=None,
+        help="Path to the shared testkit directory containing expected/*.schema.json.",
+    )
+    parser.add_argument(
         "--canary-fixture",
         default=None,
         help="Optional canary fixture directory to seed inside the runtime root.",
@@ -64,6 +70,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Parent directory used to detect writes outside the runtime root.",
     )
     parser.add_argument("--tty", action="store_true", help="Run the candidate under a PTY.")
+    parser.add_argument(
+        "--process-overlap",
+        action="store_true",
+        help="Block the fake child until all three PIDs are observed alive.",
+    )
     parser.add_argument(
         "--keep-artifacts",
         action="store_true",
@@ -105,12 +116,15 @@ def check_file_mode(path: Path, expected: int, label: str, errors: list[str]) ->
         errors.append(f"{label} mode is {oct(mode)}, expected {oct(expected)}")
 
 
-def find_run_dir(runtime_root: Path) -> Path | None:
+def find_run_dir(runtime_root: Path, timeout: float = 10.0) -> Path | None:
     hex_chars = set("0123456789abcdef")
-    for entry in runtime_root.iterdir():
-        name = entry.name
-        if entry.is_dir() and len(name) == 32 and all(c in hex_chars for c in name.lower()):
-            return entry
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        for entry in runtime_root.iterdir():
+            name = entry.name
+            if entry.is_dir() and len(name) == 32 and all(c in hex_chars for c in name.lower()):
+                return entry
+        time.sleep(0.01)
     return None
 
 
@@ -131,9 +145,60 @@ def _first_command(hooks_config: Any) -> str | None:
     return None
 
 
+def _is_process_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except (OSError, ProcessLookupError):
+        return False
+    return True
+
+
+def _collect_pids(supervisor_pid: int, run_dir: Path) -> list[int]:
+    pids = [supervisor_pid]
+    for name in ("sidecar.pid", "child.pid"):
+        pid_path = run_dir / name
+        deadline = time.monotonic() + 5
+        while not pid_path.exists() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        if not pid_path.exists():
+            raise RuntimeError(f"PID file missing: {name}")
+        pids.append(int(pid_path.read_text(encoding="utf-8").strip().split()[0]))
+    return pids
+
+
+def _prepare_isolated_env(runtime_root: Path, env: dict[str, str]) -> dict[str, str]:
+    """Redirect common writable directories under the runtime root."""
+    env = env.copy()
+    env["PYTHONDONTWRITEBYTECODE"] = "1"
+    env["PYTHONPYCACHEPREFIX"] = str(runtime_root / "pycache")
+    env["TMPDIR"] = str(runtime_root / "tmp")
+    env["TEMP"] = str(runtime_root / "tmp")
+    env["TMP"] = str(runtime_root / "tmp")
+    env["HOME"] = str(runtime_root / "home")
+    env["XDG_CACHE_HOME"] = str(runtime_root / "cache")
+    env["XDG_CONFIG_HOME"] = str(runtime_root / "config")
+    env["XDG_DATA_HOME"] = str(runtime_root / "data")
+    for key in (
+        "PYTHONPYCACHEPREFIX",
+        "TMPDIR",
+        "TEMP",
+        "TMP",
+        "HOME",
+        "XDG_CACHE_HOME",
+        "XDG_CONFIG_HOME",
+        "XDG_DATA_HOME",
+    ):
+        Path(env[key]).mkdir(parents=True, exist_ok=True)
+    return env
+
+
 def run_candidate(
     args: argparse.Namespace, runtime_root: Path, canary: Path
-) -> tuple[subprocess.Popen, int]:
+) -> tuple[subprocess.Popen, int, Path | None]:
+    contract_dir = Path(args.contract_dir).resolve() if args.contract_dir else Path(__file__).parent
+    if not (contract_dir / "expected" / "event.schema.json").exists():
+        raise FileNotFoundError(f"--contract-dir missing expected schemas: {contract_dir}")
+
     cmd = [
         args.candidate,
         "--model",
@@ -142,6 +207,8 @@ def run_candidate(
         args.permission_mode,
         "--devin-bin",
         args.devin_bin,
+        "--contract-dir",
+        str(contract_dir),
         "--runtime-root",
         str(runtime_root),
         "--canary",
@@ -150,15 +217,20 @@ def run_candidate(
     ]
     if args.existing_hooks:
         cmd.extend(["--existing-hooks", args.existing_hooks])
+
     env = os.environ.copy()
     env["GOAL_DEVIN_FAKE_EXIT_CODE"] = "0"
     env["GOAL_DEVIN_FAKE_SLEEP"] = "0.1"
+    env = _prepare_isolated_env(runtime_root, env)
 
     if args.existing_hooks:
         existing = load_json(Path(args.existing_hooks))
         expected_cmd = _first_command(existing)
         if expected_cmd:
             env["GOAL_DEVIN_EXPECTED_EXISTING_HOOK_COMMAND"] = expected_cmd
+
+    if args.process_overlap:
+        env["GOAL_DEVIN_BARRIER"] = "1"
 
     if args.tty:
         import pty
@@ -173,13 +245,16 @@ def run_candidate(
             close_fds=True,
         )
         os.close(slave)
+        run_dir: Path | None = None
+        if args.process_overlap:
+            raise RuntimeError("--tty and --process-overlap are not supported together")
         returncode = proc.wait()
         try:
             os.read(master, 4096)
         except OSError:
             pass
         os.close(master)
-        return proc, returncode
+        return proc, returncode, run_dir
 
     proc = subprocess.Popen(
         cmd,
@@ -188,8 +263,21 @@ def run_candidate(
         stderr=subprocess.PIPE,
         env=env,
     )
+
+    run_dir: Path | None = None
+    if args.process_overlap:
+        run_dir = find_run_dir(runtime_root, timeout=10)
+        if run_dir is None:
+            stdout, stderr = proc.communicate(timeout=5)
+            raise RuntimeError(f"No run directory appeared under {runtime_root}: {stderr.decode()}")
+        pids = _collect_pids(proc.pid, run_dir)
+        not_alive = [pid for pid in pids if not _is_process_alive(pid)]
+        if not_alive:
+            raise RuntimeError(f"Processes not alive during overlap: {not_alive}")
+        (run_dir / "continue").write_text("go\n", encoding="utf-8")
+
     stdout, stderr = proc.communicate()
-    return proc, proc.returncode
+    return proc, proc.returncode, run_dir
 
 
 def _check_lifecycle(log_path: Path, errors: list[str]) -> None:
@@ -220,6 +308,39 @@ def _no_outside_writes(base_dir: Path, runtime_root: Path, errors: list[str]) ->
                 errors.append(f"File or directory outside runtime root: {resolved}")
 
 
+def _check_file_modes(run_dir: Path, errors: list[str]) -> None:
+    check_directory_mode(run_dir, 0o700, "run_dir", errors)
+    events_dir = run_dir / "events"
+    check_directory_mode(events_dir, 0o700, "events_dir", errors)
+
+    files_600 = [
+        ("supervisor.pid", "supervisor.pid"),
+        ("sidecar.pid", "sidecar.pid"),
+        ("child.pid", "child.pid"),
+        ("sidecar-ready", "sidecar-ready"),
+        ("lifecycle.log", "lifecycle.log"),
+        ("manifest.json", "manifest.json"),
+        ("summary.json", "summary.json"),
+        ("event.schema.json", "event.schema.json"),
+        ("fake-devin.record.json", "fake-devin.record.json"),
+    ]
+    for name, label in files_600:
+        path = run_dir / name
+        if path.exists():
+            check_file_mode(path, 0o600, label, errors)
+        else:
+            errors.append(f"Expected file missing: {label}")
+
+    hook_path = run_dir / "hook"
+    if hook_path.exists():
+        check_file_mode(hook_path, 0o700, "hook executable", errors)
+    else:
+        errors.append("hook executable missing")
+
+    for event_file in events_dir.glob("*.json"):
+        check_file_mode(event_file, 0o600, f"event file {event_file.name}", errors)
+
+
 def run_contract(args: argparse.Namespace) -> list[str]:
     errors: list[str] = []
 
@@ -237,6 +358,8 @@ def run_contract(args: argparse.Namespace) -> list[str]:
 
     canary = runtime_root / "canary"
     if args.canary_fixture:
+        if canary.exists():
+            shutil.rmtree(canary)
         shutil.copytree(args.canary_fixture, canary)
     else:
         canary.mkdir(parents=True, exist_ok=True)
@@ -248,7 +371,13 @@ def run_contract(args: argparse.Namespace) -> list[str]:
         shutil.copyfile(args.existing_hooks, hooks_file)
         existing_bytes = hooks_file.read_bytes()
 
-    proc, returncode = run_candidate(args, runtime_root, canary)
+    try:
+        proc, returncode, run_dir = run_candidate(args, runtime_root, canary)
+    except RuntimeError as exc:
+        errors.append(str(exc))
+        if not args.keep_artifacts:
+            shutil.rmtree(base_dir, ignore_errors=True)
+        return errors
 
     if returncode != 0:
         errors.append(f"Candidate exited with code {returncode}")
@@ -259,7 +388,8 @@ def run_contract(args: argparse.Namespace) -> list[str]:
         except Exception:
             pass
 
-    run_dir = find_run_dir(runtime_root)
+    if run_dir is None:
+        run_dir = find_run_dir(runtime_root)
     if run_dir is None:
         errors.append("No run directory found under runtime root")
         if not args.keep_artifacts:
@@ -289,21 +419,15 @@ def run_contract(args: argparse.Namespace) -> list[str]:
     summary = load_json(summary_path)
     record = load_json(record_path)
 
+    contract_dir = Path(args.contract_dir).resolve() if args.contract_dir else Path(__file__).parent
     errors.extend(
-        schema_validator.validate_file(
-            manifest, Path(__file__).parent / "expected" / "manifest.schema.json"
-        )
+        schema_validator.validate_file(manifest, contract_dir / "expected" / "manifest.schema.json")
     )
     errors.extend(
-        schema_validator.validate_file(
-            summary, Path(__file__).parent / "expected" / "summary.schema.json"
-        )
+        schema_validator.validate_file(summary, contract_dir / "expected" / "summary.schema.json")
     )
 
-    check_directory_mode(run_dir, 0o700, "run_dir", errors)
-    check_directory_mode(events_dir, 0o700, "events_dir", errors)
-    check_file_mode(manifest_path, 0o600, "manifest.json", errors)
-    check_file_mode(summary_path, 0o600, "summary.json", errors)
+    _check_file_modes(run_dir, errors)
 
     if manifest.get("model") != args.model:
         errors.append(f"manifest model mismatch: {manifest.get('model')}")
@@ -318,13 +442,10 @@ def run_contract(args: argparse.Namespace) -> list[str]:
         errors.append(f"fake-devin saw permission_mode {record.get('permission_mode')}")
     if record.get("cwd") != str(canary.resolve()):
         errors.append(f"fake-devin cwd mismatch: {record.get('cwd')}")
-    argv = record.get("argv", [])
-    if "--model" not in argv:
-        errors.append("fake-devin argv missing --model")
-    if "--permission-mode" not in argv:
-        errors.append("fake-devin argv missing --permission-mode")
-    if "-p" in argv or "--print" in argv:
-        errors.append("fake-devin argv contains print mode flag -p/--print")
+
+    expected_argv = ["--model", args.model, "--permission-mode", args.permission_mode]
+    if record.get("argv") != expected_argv:
+        errors.append(f"fake-devin argv is not exactly {expected_argv}: {record.get('argv')}")
 
     profile_id = manifest.get("profile_id")
     if not profile_id:
@@ -352,7 +473,7 @@ def run_contract(args: argparse.Namespace) -> list[str]:
             event = load_json(event_files[0])
             errors.extend(
                 schema_validator.validate_file(
-                    event, Path(__file__).parent / "expected" / "event.schema.json"
+                    event, contract_dir / "expected" / "event.schema.json"
                 )
             )
             if event.get("tool_name") != "run_subagent":
@@ -377,6 +498,10 @@ def run_contract(args: argparse.Namespace) -> list[str]:
             errors.append("Existing hook fixture was not restored")
         elif hooks_file.read_bytes() != existing_bytes:
             errors.append("Existing hook fixture bytes changed")
+        else:
+            original_mode = stat.S_IMODE(Path(args.existing_hooks).stat().st_mode)
+            if stat.S_IMODE(hooks_file.stat().st_mode) != original_mode:
+                errors.append("Existing hook fixture mode was not preserved")
 
     _check_lifecycle(run_dir / "lifecycle.log", errors)
     _no_outside_writes(base_dir, runtime_root, errors)

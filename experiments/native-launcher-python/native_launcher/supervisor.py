@@ -6,6 +6,7 @@ import os
 import re
 import shlex
 import shutil
+import stat
 import subprocess
 import sys
 import time
@@ -38,6 +39,17 @@ def _lifecycle_log(path: Path | None, label: str) -> None:
         fh.write(f"{label} {now}\n")
         fh.flush()
         os.fsync(fh.fileno())
+    try:
+        os.chmod(path, 0o600)
+    except OSError:
+        pass
+
+
+def _set_file_mode(path: Path, mode: int) -> None:
+    try:
+        os.chmod(path, mode)
+    except OSError:
+        pass
 
 
 def _candidate_dir() -> Path:
@@ -52,6 +64,11 @@ class Supervisor:
         self.model = args.model
         self.permission_mode = args.permission_mode
         self.devin_bin = Path(args.devin_bin).resolve()
+        self.contract_dir = Path(args.contract_dir).resolve()
+        if not (self.contract_dir / "expected" / "event.schema.json").exists():
+            raise FileNotFoundError(
+                f"--contract-dir must contain expected/event.schema.json: {self.contract_dir}"
+            )
         self.runtime_root = Path(args.runtime_root).resolve()
         self.canary_arg = Path(args.canary).resolve() if args.canary else None
         self.existing_hooks = Path(args.existing_hooks).resolve() if args.existing_hooks else None
@@ -71,7 +88,7 @@ class Supervisor:
         self.devin_proc: subprocess.Popen | None = None
         self.devin_returncode: int | None = None
         self.original_hooks_bytes: bytes | None = None
-        self.testkit_dir: Path | None = None
+        self.original_hooks_mode: int | None = None
         self.lifecycle_path: Path | None = None
 
     def _env(self) -> dict[str, str]:
@@ -88,20 +105,18 @@ class Supervisor:
         )
         return env
 
-    def _find_testkit_dir(self) -> Path | None:
-        candidate = self.devin_bin.parent
-        if (candidate / "expected" / "event.schema.json").exists():
-            return candidate
-        return None
+    def _write_pid(self, path: Path) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(str(os.getpid()), encoding="utf-8")
+        os.chmod(path, 0o600)
 
     def _copy_event_schema(self) -> None:
-        if self.testkit_dir is None:
-            return
-        src = self.testkit_dir / "expected" / "event.schema.json"
-        if src.exists():
-            dst = self.runtime_dir / "event.schema.json"
-            shutil.copyfile(src, dst)
-            os.chmod(dst, 0o600)
+        src = self.contract_dir / "expected" / "event.schema.json"
+        if not src.exists():
+            raise FileNotFoundError(f"Event schema missing in contract dir: {src}")
+        dst = self.runtime_dir / "event.schema.json"
+        shutil.copyfile(src, dst)
+        os.chmod(dst, 0o600)
 
     def _install_hook_script(self) -> list[str]:
         hook_src = Path(__file__).resolve().parent / "hook.py"
@@ -119,6 +134,7 @@ class Supervisor:
 
         if hooks_file.exists():
             self.original_hooks_bytes = hooks_file.read_bytes()
+            self.original_hooks_mode = stat.S_IMODE(hooks_file.stat().st_mode)
             try:
                 existing_config = json.loads(self.original_hooks_bytes.decode("utf-8"))
             except (json.JSONDecodeError, UnicodeDecodeError):
@@ -155,7 +171,8 @@ class Supervisor:
         hooks_file = self.canary / ".devin" / "hooks.json"
         if self.original_hooks_bytes is not None:
             hooks_file.write_bytes(self.original_hooks_bytes)
-            os.chmod(hooks_file, 0o600)
+            if self.original_hooks_mode is not None:
+                os.chmod(hooks_file, self.original_hooks_mode)
         elif hooks_file.exists():
             hooks_file.unlink()
 
@@ -177,7 +194,7 @@ class Supervisor:
             os.chmod(devin_dir, 0o700)
             dst = devin_dir / "hooks.json"
             shutil.copyfile(self.existing_hooks, dst)
-            os.chmod(dst, 0o600)
+            os.chmod(dst, stat.S_IMODE(self.existing_hooks.stat().st_mode))
 
     def _start_sidecar(self) -> None:
         candidate_dir = _candidate_dir()
@@ -194,10 +211,13 @@ class Supervisor:
         )
         ready_path = self.runtime_dir / "sidecar-ready"
         deadline = time.monotonic() + 5
-        while not ready_path.exists() and time.monotonic() < deadline:
+        while time.monotonic() < deadline:
+            if ready_path.exists():
+                return
             if self.sidecar_proc.poll() is not None:
                 break
             time.sleep(0.01)
+        raise RuntimeError("Sidecar failed to become ready within timeout")
 
     def _run_devin(self) -> None:
         env = self._env()
@@ -252,13 +272,12 @@ class Supervisor:
         self.lifecycle_path = self.runtime_dir / "lifecycle.log"
         _lifecycle_log(self.lifecycle_path, "supervisor_start")
 
-        self.testkit_dir = self._find_testkit_dir()
-
         mkdir_private(self.runtime_dir, mode=0o700)
         self.events_dir = self.runtime_dir / "events"
         self.events_dir.mkdir(parents=True, exist_ok=True)
         os.chmod(self.events_dir, 0o700)
         self.summary_path = self.runtime_dir / "summary.json"
+        self._write_pid(self.runtime_dir / "supervisor.pid")
 
         self._create_canary()
         if self.canary is None:
@@ -302,12 +321,6 @@ class Supervisor:
 
         if not self.keep_canary and self.canary is not None:
             shutil.rmtree(self.canary, ignore_errors=True)
-
-        ready_path = self.runtime_dir / "sidecar-ready"
-        try:
-            ready_path.unlink()
-        except FileNotFoundError:
-            pass
 
         if self.devin_returncode is None:
             return 1

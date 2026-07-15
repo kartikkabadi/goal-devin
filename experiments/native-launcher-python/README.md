@@ -11,6 +11,7 @@ experiments/native-launcher-python/goal-devin-dev \
   --model swe-1-7 \
   --permission-mode accept-edits \
   --devin-bin <path-to-fake-devin> \
+  --contract-dir experiments/native-launcher-testkit \
   --runtime-root <temporary-runtime-root>
 ```
 
@@ -18,8 +19,10 @@ Optional flags:
 
 - `--canary <dir>` — use a pre-existing canary directory inside `--runtime-root`.
 - `--existing-hooks <path>` — pre-seed `.devin/hooks.json` and restore it after
-  the run.
+  the run (original bytes and mode preserved).
 - `--keep-canary` — do not remove the canary directory after the run.
+- `--contract-dir <dir>` — path to the shared testkit directory containing the
+  authoritative `expected/*.schema.json` schemas (required).
 
 ## Running the shared contract
 
@@ -27,10 +30,15 @@ Optional flags:
 python3 experiments/native-launcher-testkit/run-contract.py \
   --candidate experiments/native-launcher-python/goal-devin-dev \
   --devin-bin experiments/native-launcher-testkit/fake-devin \
+  --contract-dir experiments/native-launcher-testkit \
   --canary-fixture experiments/native-launcher-testkit/fixtures/canary \
   --runtime-root $(mktemp -d) \
+  --base-dir $(mktemp -d) \
   --keep-artifacts
 ```
+
+Use `--process-overlap` to prove supervisor, sidecar, and fake child are alive
+simultaneously, and `--tty` to prove stdio TTY inheritance.
 
 ## Running candidate tests
 
@@ -74,6 +82,14 @@ observation hook, run a sidecar, spawn a fake `devin` child with inherited
 stdio, and clean up generated artifacts.
 - The event spool uses atomic temp-to-`.json` renames.
 - The sidecar consumes events and writes a bounded summary.
+- `devin` is spawned with the exact allowed argv (`--model` and `--permission-mode`
+  only) and no `-p`/`--print` flag.
+- The fake child can be blocked while the runner observes supervisor, sidecar,
+  and child PIDs simultaneously (no `exec`).
+- All runtime artifacts have explicit expected file and directory modes.
+- Existing hook fixtures are byte- and mode-preserved.
+- `model` and `permission-mode` are validated as one-line identifiers before YAML
+  interpolation.
 
 ## What is not proven
 
@@ -83,3 +99,5 @@ verified here.
 - Production integration with the real `goal-devin` package.
 - Real Devin CLI behavior, ACP orchestration, or native TUI `--export` support.
 - Failure handling, signal interruption, sidecar restart, or rate limits.
+- Symlink-escape hardening beyond runtime-root/canary path resolution; production
+  must use a more robust sandbox.

@@ -99,6 +99,17 @@ class Sidecar:
         except OSError:
             pass
 
+    def _write_pid(self) -> None:
+        pid_path = self.runtime_dir / "sidecar.pid"
+        try:
+            with open(pid_path, "w", encoding="utf-8") as fh:
+                fh.write(f"{os.getpid()}\n")
+                fh.flush()
+                os.fsync(fh.fileno())
+            os.chmod(pid_path, 0o600)
+        except OSError:
+            pass
+
     def _signal_ready(self) -> None:
         ready_path = self.runtime_dir / "sidecar-ready"
         try:
@@ -106,12 +117,14 @@ class Sidecar:
                 fh.write("ready\n")
                 fh.flush()
                 os.fsync(fh.fileno())
+            os.chmod(ready_path, 0o600)
         except OSError:
             pass
 
     def run(self) -> int:
         self.events_dir.mkdir(parents=True, exist_ok=True)
         self._update_summary()
+        self._write_pid()
         _lifecycle_log(self.lifecycle_path, "sidecar_start")
         self._signal_ready()
 

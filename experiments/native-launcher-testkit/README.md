@@ -20,13 +20,17 @@ candidate (R1A) and the future Rust candidate (R1B).
 python3 experiments/native-launcher-testkit/run-contract.py \
   --candidate experiments/native-launcher-python/goal-devin-dev \
   --devin-bin experiments/native-launcher-testkit/fake-devin \
+  --contract-dir experiments/native-launcher-testkit \
   --canary-fixture experiments/native-launcher-testkit/fixtures/canary \
   --runtime-root $(mktemp -d) \
+  --base-dir $(mktemp -d) \
   --keep-artifacts
 ```
 
 Add `--tty` to run the candidate under a PTY and assert that `fake-devin`
 observes TTY file descriptors.
+Add `--process-overlap` to block the fake child until the shared runner has
+observed supervisor, sidecar, and child PIDs alive simultaneously.
 
 ## Security assumptions
 
@@ -41,13 +45,15 @@ leaking secret names; it does not access the network.
 
 The contract verifies:
 
-- supervisor/sidecar/child lifecycle;
+- supervisor/sidecar/child lifecycle and exact argv (`--model` + `--permission-mode`);
+- process overlap (all three PIDs alive simultaneously) when run with `--process-overlap`;
 - exact model and permission mode passthrough;
-- generated worker profile model and read-only tool policy;
-- observation hook installation and invocation;
+- generated worker profile model, name, and read-only tool policy;
+- observation hook installation, fail-open behavior, and invocation;
 - atomic event publication and sidecar consumption;
-- exact-byte restoration of existing hook fixtures;
-- profile cleanup and TTY inheritance.
+- exact-byte and exact-mode restoration of existing hook fixtures;
+- profile cleanup, TTY inheritance, and explicit file modes on all artifacts;
+- schema validity of manifest, event, and summary artifacts.
 
 ## What is not proven
 
@@ -57,3 +63,5 @@ The contract verifies:
 verified.
 - Failure handling, signal interruption, sidecar death/restart, or rate-limit
 behavior.
+- Complete isolation from all system write paths; the runner redirects common
+environment variables but cannot intercept hard-coded paths.

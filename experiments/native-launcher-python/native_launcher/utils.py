@@ -2,7 +2,6 @@
 
 import json
 import os
-import secrets
 import stat
 import tempfile
 from datetime import datetime, timezone
@@ -16,7 +15,7 @@ def utcnow_iso() -> str:
 
 def random_id(nbytes: int = 16) -> str:
     """Return a cryptographically random hex identifier."""
-    return secrets.token_hex(nbytes)
+    return os.urandom(nbytes).hex()
 
 
 def safe_path_under(root: Path | str, path: Path | str) -> bool:

@@ -21,6 +21,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--devin-bin", required=True, help="Path to the devin executable to launch."
     )
     parser.add_argument(
+        "--contract-dir",
+        required=True,
+        help="Path to the shared testkit directory containing expected/*.schema.json.",
+    )
+    parser.add_argument(
         "--runtime-root",
         required=True,
         help="Directory where the candidate may create its private runtime directory.",
