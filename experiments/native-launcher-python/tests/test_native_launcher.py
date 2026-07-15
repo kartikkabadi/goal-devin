@@ -19,7 +19,7 @@ TESTKIT = REPO_ROOT / "experiments" / "native-launcher-testkit"
 FAKE_DEVIN = TESTKIT / "fake-devin"
 RUN_CONTRACT = TESTKIT / "run-contract.py"
 CANARY_FIXTURE = TESTKIT / "fixtures" / "canary"
-EXISTING_HOOKS = TESTKIT / "fixtures" / "existing-hooks" / ".devin" / "hooks.json"
+EXISTING_HOOKS = TESTKIT / "fixtures" / "existing-hooks" / ".devin" / "hooks.v1.json"
 
 _spec = importlib.util.spec_from_file_location(
     "schema_validator", str(TESTKIT / "schema_validator.py")
@@ -29,33 +29,56 @@ sys.modules["schema_validator"] = schema_validator
 _spec.loader.exec_module(schema_validator)
 
 
+def _find_run_dir(runtime_root: Path) -> Path | None:
+    hex_chars = set("0123456789abcdef")
+    for entry in runtime_root.iterdir():
+        name = entry.name
+        if entry.is_dir() and len(name) == 32 and all(c in hex_chars for c in name.lower()):
+            return entry
+    return None
+
+
 def _run_contract(
     *,
+    candidate: Path | None = None,
+    canary_fixture: Path | None = None,
+    existing_hooks: bool | str | Path = False,
     tty: bool = False,
-    existing_hooks: bool = False,
     process_overlap: bool = False,
     keep: bool = False,
     extra_env: dict | None = None,
-) -> tuple[int, list[str], Path | None]:
+    contract_dir: Path | None = None,
+) -> tuple[int, list[str], Path]:
+    """Run the shared contract and return (rc, error_lines, runtime_root)."""
     base_dir = Path(tempfile.mkdtemp(prefix="goal-devin-r1a1-test-"))
     runtime_root = base_dir / "runtime"
     runtime_root.mkdir(parents=True, exist_ok=True)
+    chosen_candidate = candidate or CANDIDATE
+    chosen_canary = canary_fixture or CANARY_FIXTURE
+    chosen_contract_dir = contract_dir or TESTKIT
+    existing_hooks_path: Path | None = None
+    if isinstance(existing_hooks, (str, Path)) and existing_hooks:
+        existing_hooks_path = Path(existing_hooks)
+    elif existing_hooks:
+        existing_hooks_path = EXISTING_HOOKS
     cmd = [
         "python3",
         str(RUN_CONTRACT),
         "--candidate",
-        str(CANDIDATE),
+        str(chosen_candidate),
         "--devin-bin",
         str(FAKE_DEVIN),
+        "--contract-dir",
+        str(chosen_contract_dir),
         "--canary-fixture",
-        str(CANARY_FIXTURE),
+        str(chosen_canary),
         "--runtime-root",
         str(runtime_root),
         "--base-dir",
         str(base_dir),
     ]
-    if existing_hooks:
-        cmd.extend(["--existing-hooks", str(EXISTING_HOOKS)])
+    if existing_hooks_path:
+        cmd.extend(["--existing-hooks", str(existing_hooks_path)])
     if tty:
         cmd.append("--tty")
     if process_overlap:
@@ -75,46 +98,18 @@ def _run_contract(
         env=env,
     )
     errors = [line.strip() for line in result.stderr.splitlines() if line.startswith("  - ")]
-    return result.returncode, errors, runtime_root if keep else None
+    return result.returncode, errors, runtime_root
 
 
 @pytest.fixture
 def contract_pass(tmp_path):
     """Run the contract and return the runtime directory for assertions."""
-    base_dir = tmp_path / "base"
-    runtime_root = base_dir / "runtime"
-    runtime_root.mkdir(parents=True, exist_ok=True)
-    cmd = [
-        "python3",
-        str(RUN_CONTRACT),
-        "--candidate",
-        str(CANDIDATE),
-        "--devin-bin",
-        str(FAKE_DEVIN),
-        "--canary-fixture",
-        str(CANARY_FIXTURE),
-        "--runtime-root",
-        str(runtime_root),
-        "--base-dir",
-        str(base_dir),
-        "--keep-artifacts",
-    ]
-    result = subprocess.run(
-        cmd,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        env={**os.environ, "GOAL_DEVIN_FAKE_EXIT_CODE": "0", "GOAL_DEVIN_FAKE_SLEEP": "0.1"},
-    )
-    assert result.returncode == 0, result.stderr
-    hex_chars = set("0123456789abcdef")
-    run_dirs = [
-        p
-        for p in runtime_root.iterdir()
-        if p.is_dir() and len(p.name) == 32 and all(c in hex_chars for c in p.name.lower())
-    ]
-    assert run_dirs, f"No run directory found in {runtime_root}"
-    return run_dirs[0]
+    rc, errors, runtime_root = _run_contract(keep=True)
+    assert rc == 0, "\n".join(errors)
+    run_dir = _find_run_dir(runtime_root)
+    assert run_dir, f"No run directory found in {runtime_root}"
+    yield run_dir
+    shutil.rmtree(runtime_root.parent, ignore_errors=True)
 
 
 def test_happy_path_lifecycle():
@@ -189,10 +184,10 @@ def test_existing_hook_exact_byte_restoration():
     rc, errors, runtime_root = _run_contract(existing_hooks=True, keep=True)
     assert rc == 0, "\n".join(errors)
     try:
-        restored = (runtime_root / "canary" / ".devin" / "hooks.json").read_bytes()
+        restored = (runtime_root / "canary" / ".devin" / "hooks.v1.json").read_bytes()
         assert restored == original
     finally:
-        shutil.rmtree(runtime_root, ignore_errors=True)
+        shutil.rmtree(runtime_root.parent, ignore_errors=True)
 
 
 def test_profile_cleanup(contract_pass):
@@ -248,14 +243,8 @@ def test_process_overlap():
     rc, errors, runtime_root = _run_contract(process_overlap=True, keep=True)
     try:
         assert rc == 0, "\n".join(errors)
-        hex_chars = set("0123456789abcdef")
-        run_dirs = [
-            p
-            for p in runtime_root.iterdir()
-            if p.is_dir() and len(p.name) == 32 and all(c in hex_chars for c in p.name.lower())
-        ]
-        assert run_dirs
-        run_dir = run_dirs[0]
+        run_dir = _find_run_dir(runtime_root)
+        assert run_dir
         lifecycle = (run_dir / "lifecycle.log").read_text(encoding="utf-8")
         for label in ("supervisor_start", "sidecar_start", "child_start"):
             assert label in lifecycle
@@ -264,7 +253,7 @@ def test_process_overlap():
         record = json.loads((run_dir / "fake-devin.record.json").read_text())
         assert record.get("sidecar_total_events", 0) >= 1
     finally:
-        shutil.rmtree(runtime_root, ignore_errors=True)
+        shutil.rmtree(runtime_root.parent, ignore_errors=True)
 
 
 def test_lifecycle_order(contract_pass):
@@ -473,6 +462,167 @@ def test_agents_symlink_escape_is_rejected(tmp_path):
     agents.symlink_to(outside)
     profile_dir = agents / "goal-devin-worker-123"
     assert not safe_path_under(canary, profile_dir)
+
+
+def _make_canary_fixture_with_symlink(link_name: str, target: Path) -> Path:
+    """Return a temporary canary fixture where *link_name* is a symlink to *target*."""
+    fixture = Path(tempfile.mkdtemp(prefix="goal-devin-r1a1-symlink-fixture-"))
+    canary = fixture / "canary"
+    canary.mkdir(parents=True)
+    for item in CANARY_FIXTURE.iterdir():
+        if item.is_dir():
+            shutil.copytree(item, canary / item.name)
+        else:
+            shutil.copy2(item, canary / item.name)
+    parts = Path(link_name).parts
+    parent = canary
+    for part in parts[:-1]:
+        parent = parent / part
+        parent.mkdir(parents=True, exist_ok=True)
+    link = parent / parts[-1]
+    link.symlink_to(target, target_is_directory=target.is_dir())
+    return fixture
+
+
+def test_hooks_json_not_treated_as_standalone():
+    """Candidate must ignore .devin/hooks.json and only use .devin/hooks.v1.json."""
+    base = Path(tempfile.mkdtemp(prefix="goal-devin-r1a1-hooks-json-"))
+    canary_fixture = base / "canary"
+    shutil.copytree(CANARY_FIXTURE, canary_fixture)
+    devin_dir = canary_fixture / ".devin"
+    devin_dir.mkdir(parents=True, exist_ok=True)
+    seed = {
+        "PreToolUse": [
+            {
+                "matcher": "seed",
+                "hooks": [{"type": "command", "command": "/bin/seed", "timeout": 5}],
+            }
+        ]
+    }
+    (devin_dir / "hooks.json").write_text(json.dumps(seed, indent=2), encoding="utf-8")
+    try:
+        rc, errors, runtime_root = _run_contract(
+            canary_fixture=canary_fixture, existing_hooks=True, keep=True
+        )
+        assert rc == 0, "\n".join(errors)
+        try:
+            hooks_v1 = (runtime_root / "canary" / ".devin" / "hooks.v1.json").read_bytes()
+            assert b"/bin/seed" not in hooks_v1, "Candidate merged hooks.json into hooks.v1.json"
+            assert hooks_v1 == EXISTING_HOOKS.read_bytes()
+        finally:
+            shutil.rmtree(runtime_root.parent, ignore_errors=True)
+    finally:
+        shutil.rmtree(base, ignore_errors=True)
+
+
+def test_exec_replacement_is_rejected():
+    """A candidate that execs fake-devin must be rejected because PIDs are not distinct."""
+    rc, errors, _ = _run_contract(
+        candidate=TESTKIT / "fixtures" / "exec-candidate.py",
+        process_overlap=True,
+    )
+    assert rc != 0
+    assert any("distinct" in e.lower() or "supervisor.pid" in e.lower() for e in errors)
+
+
+def test_outside_write_candidate_is_rejected():
+    """A candidate that writes a sibling file under the base dir must be rejected."""
+    rc, errors, _ = _run_contract(
+        candidate=TESTKIT / "fixtures" / "outside-write-candidate.py",
+    )
+    assert rc != 0
+    assert any("outside" in e.lower() for e in errors)
+
+
+def test_canary_devin_dir_symlink_rejected_by_candidate():
+    fixture = _make_canary_fixture_with_symlink(".devin", Path(tempfile.mkdtemp()))
+    sentinel = Path(tempfile.mkdtemp()) / "sentinel.txt"
+    sentinel.write_text("preserve me", encoding="utf-8")
+    try:
+        # Point the .devin symlink at a directory containing the sentinel.
+        (fixture / "canary" / ".devin").unlink()
+        (fixture / "canary" / ".devin").symlink_to(sentinel.parent, target_is_directory=True)
+        original = sentinel.read_bytes()
+        rc, errors, _ = _run_contract(canary_fixture=fixture / "canary")
+        assert rc != 0
+        assert sentinel.read_bytes() == original
+        assert any("symlink" in e.lower() for e in errors)
+    finally:
+        shutil.rmtree(fixture, ignore_errors=True)
+        shutil.rmtree(sentinel.parent, ignore_errors=True)
+
+
+def test_canary_agents_dir_symlink_rejected_by_candidate():
+    outside = Path(tempfile.mkdtemp())
+    sentinel = outside / "sentinel.txt"
+    sentinel.write_text("preserve me", encoding="utf-8")
+    fixture = _make_canary_fixture_with_symlink(".devin/agents", outside)
+    try:
+        original = sentinel.read_bytes()
+        rc, errors, _ = _run_contract(canary_fixture=fixture / "canary")
+        assert rc != 0
+        assert sentinel.read_bytes() == original
+        assert any("symlink" in e.lower() for e in errors)
+    finally:
+        shutil.rmtree(fixture, ignore_errors=True)
+        shutil.rmtree(outside, ignore_errors=True)
+
+
+def test_canary_hooks_v1_symlink_rejected_by_candidate():
+    outside = Path(tempfile.mkdtemp())
+    sentinel = outside / "hooks.v1.json"
+    sentinel.write_text('{"PreToolUse": []}', encoding="utf-8")
+    fixture = _make_canary_fixture_with_symlink(".devin/hooks.v1.json", sentinel)
+    try:
+        original = sentinel.read_bytes()
+        rc, errors, _ = _run_contract(canary_fixture=fixture / "canary")
+        assert rc != 0
+        assert sentinel.read_bytes() == original
+        assert any("symlink" in e.lower() for e in errors)
+    finally:
+        shutil.rmtree(fixture, ignore_errors=True)
+        shutil.rmtree(outside, ignore_errors=True)
+
+
+def test_invalid_event_schema_rejected_at_startup():
+    bad_contract = Path(tempfile.mkdtemp())
+    (bad_contract / "expected").mkdir(parents=True)
+    (bad_contract / "expected" / "event.schema.json").write_text("not json", encoding="utf-8")
+    try:
+        rc, errors, _ = _run_contract(contract_dir=bad_contract)
+        assert rc != 0
+        assert any("schema" in e.lower() for e in errors)
+    finally:
+        shutil.rmtree(bad_contract, ignore_errors=True)
+
+
+def test_runtime_root_outside_base_dir_rejected():
+    base_dir = Path(tempfile.mkdtemp())
+    runtime_root = Path(tempfile.mkdtemp()) / "runtime"
+    runtime_root.mkdir(parents=True)
+    try:
+        cmd = [
+            "python3",
+            str(RUN_CONTRACT),
+            "--candidate",
+            str(CANDIDATE),
+            "--devin-bin",
+            str(FAKE_DEVIN),
+            "--contract-dir",
+            str(TESTKIT),
+            "--canary-fixture",
+            str(CANARY_FIXTURE),
+            "--runtime-root",
+            str(runtime_root),
+            "--base-dir",
+            str(base_dir),
+        ]
+        result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        assert result.returncode != 0
+        assert "runtime-root" in result.stderr.lower()
+    finally:
+        shutil.rmtree(base_dir, ignore_errors=True)
+        shutil.rmtree(runtime_root.parent, ignore_errors=True)
 
 
 def test_production_source_tree_unchanged():

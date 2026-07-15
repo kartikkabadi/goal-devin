@@ -17,7 +17,7 @@ from typing import Any
 from . import __version__
 from .manifest import make_manifest
 from .profile import make_profile, make_profile_id, remove_profile
-from .utils import atomic_write, mkdir_private, random_id, safe_path_under
+from .utils import atomic_write, has_symlink_component, mkdir_private, random_id, safe_path_under
 
 
 def _validate_model(model: str) -> None:
@@ -65,10 +65,19 @@ class Supervisor:
         self.permission_mode = args.permission_mode
         self.devin_bin = Path(args.devin_bin).resolve()
         self.contract_dir = Path(args.contract_dir).resolve()
-        if not (self.contract_dir / "expected" / "event.schema.json").exists():
-            raise FileNotFoundError(
+        event_schema_path = self.contract_dir / "expected" / "event.schema.json"
+        if not event_schema_path.exists():
+            raise RuntimeError(
                 f"--contract-dir must contain expected/event.schema.json: {self.contract_dir}"
             )
+        try:
+            schema = json.loads(event_schema_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise RuntimeError(f"Invalid event schema JSON in {event_schema_path}: {exc}") from exc
+        if not isinstance(schema, dict) or "properties" not in schema:
+            raise RuntimeError(f"Invalid event schema shape: {event_schema_path}")
+        self._event_schema = schema
+
         self.runtime_root = Path(args.runtime_root).resolve()
         self.canary_arg = Path(args.canary).resolve() if args.canary else None
         self.existing_hooks = Path(args.existing_hooks).resolve() if args.existing_hooks else None
@@ -128,9 +137,13 @@ class Supervisor:
 
     def _install_canary_hook(self, hook_command: list[str]) -> None:
         devin_dir = self.canary / ".devin"
+        if has_symlink_component(self.canary, devin_dir):
+            raise ValueError("canary .devin path contains a symlink")
         devin_dir.mkdir(parents=True, exist_ok=True)
         os.chmod(devin_dir, 0o700)
-        hooks_file = devin_dir / "hooks.json"
+        hooks_file = devin_dir / "hooks.v1.json"
+        if has_symlink_component(self.canary, hooks_file):
+            raise ValueError("canary hooks.v1.json path contains a symlink")
 
         if hooks_file.exists():
             self.original_hooks_bytes = hooks_file.read_bytes()
@@ -168,7 +181,7 @@ class Supervisor:
     def _restore_canary_hook(self) -> None:
         if self.canary is None:
             return
-        hooks_file = self.canary / ".devin" / "hooks.json"
+        hooks_file = self.canary / ".devin" / "hooks.v1.json"
         if self.original_hooks_bytes is not None:
             hooks_file.write_bytes(self.original_hooks_bytes)
             if self.original_hooks_mode is not None:
@@ -180,6 +193,8 @@ class Supervisor:
         if self.canary_arg:
             if not safe_path_under(self.runtime_root, self.canary_arg):
                 raise ValueError("canary must be inside runtime-root")
+            if has_symlink_component(self.runtime_root, self.canary_arg):
+                raise ValueError("canary path contains a symlink")
             self.canary = self.canary_arg
             self.canary.mkdir(parents=True, exist_ok=True)
         else:
@@ -190,9 +205,13 @@ class Supervisor:
             if not self.existing_hooks.exists():
                 raise FileNotFoundError(f"existing-hooks fixture not found: {self.existing_hooks}")
             devin_dir = self.canary / ".devin"
+            if has_symlink_component(self.canary, devin_dir):
+                raise ValueError("canary .devin path contains a symlink")
             devin_dir.mkdir(parents=True, exist_ok=True)
             os.chmod(devin_dir, 0o700)
-            dst = devin_dir / "hooks.json"
+            dst = devin_dir / "hooks.v1.json"
+            if has_symlink_component(self.canary, dst):
+                raise ValueError("canary hooks.v1.json path contains a symlink")
             shutil.copyfile(self.existing_hooks, dst)
             os.chmod(dst, stat.S_IMODE(self.existing_hooks.stat().st_mode))
 

@@ -12,13 +12,15 @@ experiments/native-launcher-python/goal-devin-dev \
   --permission-mode accept-edits \
   --devin-bin <path-to-fake-devin> \
   --contract-dir experiments/native-launcher-testkit \
-  --runtime-root <temporary-runtime-root>
+  --runtime-root "$BASE/runtime" \
+  --base-dir "$BASE"
 ```
 
-Optional flags:
+`--runtime-root` must be inside `--base-dir` so the outside-write oracle is
+meaningful. Optional flags:
 
 - `--canary <dir>` — use a pre-existing canary directory inside `--runtime-root`.
-- `--existing-hooks <path>` — pre-seed `.devin/hooks.json` and restore it after
+- `--existing-hooks <path>` — pre-seed `.devin/hooks.v1.json` and restore it after
   the run (original bytes and mode preserved).
 - `--keep-canary` — do not remove the canary directory after the run.
 - `--contract-dir <dir>` — path to the shared testkit directory containing the
@@ -27,13 +29,14 @@ Optional flags:
 ## Running the shared contract
 
 ```bash
+BASE=$(mktemp -d)
 python3 experiments/native-launcher-testkit/run-contract.py \
   --candidate experiments/native-launcher-python/goal-devin-dev \
   --devin-bin experiments/native-launcher-testkit/fake-devin \
   --contract-dir experiments/native-launcher-testkit \
   --canary-fixture experiments/native-launcher-testkit/fixtures/canary \
-  --runtime-root $(mktemp -d) \
-  --base-dir $(mktemp -d) \
+  --runtime-root "$BASE/runtime" \
+  --base-dir "$BASE" \
   --keep-artifacts
 ```
 
@@ -85,11 +88,23 @@ stdio, and clean up generated artifacts.
 - `devin` is spawned with the exact allowed argv (`--model` and `--permission-mode`
   only) and no `-p`/`--print` flag.
 - The fake child can be blocked while the runner observes supervisor, sidecar,
-  and child PIDs simultaneously (no `exec`).
-- All runtime artifacts have explicit expected file and directory modes.
-- Existing hook fixtures are byte- and mode-preserved.
+  and child PIDs simultaneously. The runner verifies `supervisor.pid` matches the
+  launcher process, all three PIDs are pairwise distinct, and none are replaced
+  by `exec` (a negative-control candidate that execs fake `devin` is rejected).
+- All runtime artifacts have explicit expected file and directory modes;
+  generated `AGENT.md` is mode `0600`.
+- Existing hook fixtures are byte- and mode-preserved using `.devin/hooks.v1.json`
+  only; `.devin/hooks.json` is never used as the standalone source.
 - `model` and `permission-mode` are validated as one-line identifiers before YAML
   interpolation.
+- The authoritative event schema JSON is parsed and validated before any runtime
+  or project artifacts are created; the sidecar rejects events if the schema is
+  missing or invalid.
+- The candidate rejects symlinks for `.devin`, `.devin/agents`, `.devin/hooks.v1.json`,
+  and the generated profile path before mutation.
+- The outside-write oracle is self-consistent: `--runtime-root` must be inside
+  `--base-dir`; a negative-control candidate that writes a sibling file under the
+  base is rejected.
 
 ## What is not proven
 
@@ -99,5 +114,5 @@ verified here.
 - Production integration with the real `goal-devin` package.
 - Real Devin CLI behavior, ACP orchestration, or native TUI `--export` support.
 - Failure handling, signal interruption, sidecar restart, or rate limits.
-- Symlink-escape hardening beyond runtime-root/canary path resolution; production
-  must use a more robust sandbox.
+- Complete system-wide sandboxing; the candidate resolves paths under the
+  supplied runtime root but cannot intercept hard-coded paths outside it.

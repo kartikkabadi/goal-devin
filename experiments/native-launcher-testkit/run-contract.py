@@ -6,6 +6,7 @@ import json
 import os
 import re
 import shutil
+import signal
 import stat
 import subprocess
 import sys
@@ -57,7 +58,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--existing-hooks",
         default=None,
-        help="Optional existing .devin/hooks.json fixture to pre-seed and verify restoration.",
+        help="Optional existing .devin/hooks.v1.json fixture to pre-seed and verify restoration.",
     )
     parser.add_argument(
         "--runtime-root",
@@ -153,8 +154,20 @@ def _is_process_alive(pid: int) -> bool:
     return True
 
 
-def _collect_pids(supervisor_pid: int, run_dir: Path) -> list[int]:
-    pids = [supervisor_pid]
+def _collect_pids(proc_pid: int, run_dir: Path) -> list[int]:
+    supervisor_pid_path = run_dir / "supervisor.pid"
+    deadline = time.monotonic() + 5
+    while not supervisor_pid_path.exists() and time.monotonic() < deadline:
+        time.sleep(0.01)
+    if not supervisor_pid_path.exists():
+        raise RuntimeError("supervisor.pid missing")
+    supervisor_pid = int(supervisor_pid_path.read_text(encoding="utf-8").strip().split()[0])
+    if supervisor_pid != proc_pid:
+        raise RuntimeError(
+            f"supervisor.pid {supervisor_pid} does not match runner process {proc_pid}"
+        )
+
+    pids: list[int] = [supervisor_pid]
     for name in ("sidecar.pid", "child.pid"):
         pid_path = run_dir / name
         deadline = time.monotonic() + 5
@@ -163,6 +176,13 @@ def _collect_pids(supervisor_pid: int, run_dir: Path) -> list[int]:
         if not pid_path.exists():
             raise RuntimeError(f"PID file missing: {name}")
         pids.append(int(pid_path.read_text(encoding="utf-8").strip().split()[0]))
+
+    if len(set(pids)) != 3:
+        raise RuntimeError(f"supervisor/sidecar/child PIDs are not pairwise distinct: {pids}")
+
+    not_alive = [pid for pid in pids if not _is_process_alive(pid)]
+    if not_alive:
+        raise RuntimeError(f"Processes not alive during overlap: {not_alive}")
     return pids
 
 
@@ -194,10 +214,10 @@ def _prepare_isolated_env(runtime_root: Path, env: dict[str, str]) -> dict[str, 
 
 def run_candidate(
     args: argparse.Namespace, runtime_root: Path, canary: Path
-) -> tuple[subprocess.Popen, int, Path | None]:
+) -> tuple[subprocess.Popen, int, Path | None, bytes, bytes]:
     contract_dir = Path(args.contract_dir).resolve() if args.contract_dir else Path(__file__).parent
     if not (contract_dir / "expected" / "event.schema.json").exists():
-        raise FileNotFoundError(f"--contract-dir missing expected schemas: {contract_dir}")
+        raise RuntimeError(f"--contract-dir missing expected schemas: {contract_dir}")
 
     cmd = [
         args.candidate,
@@ -254,7 +274,7 @@ def run_candidate(
         except OSError:
             pass
         os.close(master)
-        return proc, returncode, run_dir
+        return proc, returncode, run_dir, b"", b""
 
     proc = subprocess.Popen(
         cmd,
@@ -265,19 +285,43 @@ def run_candidate(
     )
 
     run_dir: Path | None = None
-    if args.process_overlap:
-        run_dir = find_run_dir(runtime_root, timeout=10)
-        if run_dir is None:
-            stdout, stderr = proc.communicate(timeout=5)
-            raise RuntimeError(f"No run directory appeared under {runtime_root}: {stderr.decode()}")
-        pids = _collect_pids(proc.pid, run_dir)
-        not_alive = [pid for pid in pids if not _is_process_alive(pid)]
-        if not_alive:
-            raise RuntimeError(f"Processes not alive during overlap: {not_alive}")
-        (run_dir / "continue").write_text("go\n", encoding="utf-8")
+    try:
+        if args.process_overlap:
+            run_dir = find_run_dir(runtime_root, timeout=10)
+            if run_dir is None:
+                stdout, stderr = proc.communicate(timeout=5)
+                raise RuntimeError(
+                    f"No run directory appeared under {runtime_root}: {stderr.decode()}"
+                )
+            _collect_pids(proc.pid, run_dir)
+            continue_path = run_dir / "continue"
+            continue_path.write_text("go\n", encoding="utf-8")
+            os.chmod(continue_path, 0o600)
 
-    stdout, stderr = proc.communicate()
-    return proc, proc.returncode, run_dir
+        stdout, stderr = proc.communicate()
+    except Exception:
+        try:
+            proc.kill()
+            proc.wait(timeout=2)
+        except Exception:
+            pass
+        for name in ("sidecar.pid", "child.pid"):
+            if run_dir is not None:
+                pid_path = run_dir / name
+                if pid_path.exists():
+                    try:
+                        pid = int(pid_path.read_text(encoding="utf-8").strip().split()[0])
+                        os.kill(pid, signal.SIGKILL)
+                    except (OSError, ProcessLookupError, ValueError):
+                        pass
+        raise
+    finally:
+        if run_dir is not None:
+            continue_path = run_dir / "continue"
+            if continue_path.exists():
+                continue_path.unlink()
+
+    return proc, proc.returncode, run_dir, stdout, stderr
 
 
 def _check_lifecycle(log_path: Path, errors: list[str]) -> None:
@@ -353,6 +397,11 @@ def run_contract(args: argparse.Namespace) -> list[str]:
     if args.base_dir:
         base_dir = Path(args.base_dir).resolve()
         base_dir.mkdir(parents=True, exist_ok=True)
+        if not runtime_root.resolve().is_relative_to(base_dir):
+            errors.append("--runtime-root must be inside --base-dir")
+            if not args.keep_artifacts:
+                shutil.rmtree(base_dir, ignore_errors=True)
+            return errors
     else:
         base_dir = runtime_root
 
@@ -360,19 +409,19 @@ def run_contract(args: argparse.Namespace) -> list[str]:
     if args.canary_fixture:
         if canary.exists():
             shutil.rmtree(canary)
-        shutil.copytree(args.canary_fixture, canary)
+        shutil.copytree(args.canary_fixture, canary, symlinks=True)
     else:
         canary.mkdir(parents=True, exist_ok=True)
 
     existing_bytes: bytes | None = None
     if args.existing_hooks:
-        hooks_file = canary / ".devin" / "hooks.json"
+        hooks_file = canary / ".devin" / "hooks.v1.json"
         hooks_file.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(args.existing_hooks, hooks_file)
         existing_bytes = hooks_file.read_bytes()
 
     try:
-        proc, returncode, run_dir = run_candidate(args, runtime_root, canary)
+        _proc, returncode, run_dir, _stdout, stderr = run_candidate(args, runtime_root, canary)
     except RuntimeError as exc:
         errors.append(str(exc))
         if not args.keep_artifacts:
@@ -381,12 +430,10 @@ def run_contract(args: argparse.Namespace) -> list[str]:
 
     if returncode != 0:
         errors.append(f"Candidate exited with code {returncode}")
-        try:
-            stderr = proc.stderr.read() if proc.stderr else b""
-            if stderr:
-                errors.append(f"stderr: {stderr.decode('utf-8', errors='replace')[:500]}")
-        except Exception:
-            pass
+        if stderr:
+            text = stderr.decode("utf-8", errors="replace").replace("\n", " ").strip()
+            # Capture the tail so the actual exception message is visible.
+            errors.append(f"stderr: ...{text[-500:]}")
 
     if run_dir is None:
         run_dir = find_run_dir(runtime_root)
@@ -493,7 +540,7 @@ def run_contract(args: argparse.Namespace) -> list[str]:
         errors.append("Generated profile directory was not removed")
 
     if existing_bytes is not None:
-        hooks_file = canary / ".devin" / "hooks.json"
+        hooks_file = canary / ".devin" / "hooks.v1.json"
         if not hooks_file.exists():
             errors.append("Existing hook fixture was not restored")
         elif hooks_file.read_bytes() != existing_bytes:

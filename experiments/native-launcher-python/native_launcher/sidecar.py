@@ -42,8 +42,13 @@ class Sidecar:
 
     def _validate_event(self, event: dict) -> bool:
         if not self.schema_path.exists():
-            return True
-        errors = validate_file(event, self.schema_path)
+            print("sidecar: event schema missing; rejecting event", file=sys.stderr, flush=True)
+            return False
+        try:
+            errors = validate_file(event, self.schema_path)
+        except (OSError, json.JSONDecodeError) as exc:
+            print(f"sidecar: schema invalid; rejecting event: {exc}", file=sys.stderr, flush=True)
+            return False
         if errors:
             print(f"sidecar: schema errors: {errors}", file=sys.stderr, flush=True)
             return False

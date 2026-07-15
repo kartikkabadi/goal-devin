@@ -31,6 +31,22 @@ def safe_path_under(root: Path | str, path: Path | str) -> bool:
     return common == root_resolved
 
 
+def has_symlink_component(root: Path | str, path: Path | str) -> bool:
+    """Return True if any existing component of *path* under *root* is a symlink."""
+    root = Path(root)
+    path = Path(path)
+    try:
+        rel = path.relative_to(root.resolve())
+    except ValueError:
+        return True
+    current = root
+    for part in rel.parts:
+        current = current / part
+        if current.is_symlink():
+            return True
+    return current.is_symlink()
+
+
 def mkdir_private(path: Path, mode: int = 0o700) -> None:
     """Create a directory with restricted permissions."""
     path.mkdir(parents=True, exist_ok=True)

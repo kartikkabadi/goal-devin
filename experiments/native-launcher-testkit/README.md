@@ -17,13 +17,14 @@ candidate (R1A) and the future Rust candidate (R1B).
 ## Running the contract
 
 ```bash
+BASE=$(mktemp -d)
 python3 experiments/native-launcher-testkit/run-contract.py \
   --candidate experiments/native-launcher-python/goal-devin-dev \
   --devin-bin experiments/native-launcher-testkit/fake-devin \
   --contract-dir experiments/native-launcher-testkit \
   --canary-fixture experiments/native-launcher-testkit/fixtures/canary \
-  --runtime-root $(mktemp -d) \
-  --base-dir $(mktemp -d) \
+  --runtime-root "$BASE/runtime" \
+  --base-dir "$BASE" \
   --keep-artifacts
 ```
 
@@ -40,20 +41,30 @@ disposable canary.
 - The candidate must not copy or merge the user's Devin configuration.
 - `fake-devin` deliberately records no environment variable keys to avoid
 leaking secret names; it does not access the network.
+- `--runtime-root` is required to be inside `--base-dir` so the outside-write
+oracle is self-consistent.
 
 ## What is proven
 
 The contract verifies:
 
 - supervisor/sidecar/child lifecycle and exact argv (`--model` + `--permission-mode`);
-- process overlap (all three PIDs alive simultaneously) when run with `--process-overlap`;
+- process overlap (all three PIDs alive simultaneously) when run with `--process-overlap`,
+  with `supervisor.pid` matching the launcher process and pairwise distinct PIDs;
 - exact model and permission mode passthrough;
-- generated worker profile model, name, and read-only tool policy;
-- observation hook installation, fail-open behavior, and invocation;
+- generated worker profile model, name, read-only tool policy, and `AGENT.md` mode `0600`;
+- observation hook installation through `.devin/hooks.v1.json`, fail-open behavior,
+  and invocation;
 - atomic event publication and sidecar consumption;
-- exact-byte and exact-mode restoration of existing hook fixtures;
+- exact-byte and exact-mode restoration of existing hook fixtures using `.devin/hooks.v1.json`;
 - profile cleanup, TTY inheritance, and explicit file modes on all artifacts;
-- schema validity of manifest, event, and summary artifacts.
+- schema validity of manifest, event, and summary artifacts;
+- event schema validation at candidate startup and fail-closed sidecar behavior when
+  the schema is missing or invalid;
+- symlink-escape rejection for `.devin`, `.devin/agents`, `.devin/hooks.v1.json`, and
+  the generated profile path before mutation;
+- outside-write rejection: `--runtime-root` must be inside `--base-dir`, and no files
+  outside the allowlist are permitted.
 
 ## What is not proven
 
@@ -64,4 +75,5 @@ verified.
 - Failure handling, signal interruption, sidecar death/restart, or rate-limit
 behavior.
 - Complete isolation from all system write paths; the runner redirects common
-environment variables but cannot intercept hard-coded paths.
+environment variables and rejects writes outside the runtime-root/canary allowlist,
+but cannot intercept hard-coded paths that bypass the candidate.

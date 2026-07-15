@@ -8,6 +8,7 @@ and hook, invokes the observation hook, and exits without network access.
 import json
 import os
 import shlex
+import stat
 import subprocess
 import sys
 import time
@@ -189,6 +190,9 @@ def _verify_profile(canary: Path, expected_model: str) -> str:
         raise RuntimeError(
             f"Profile model mismatch: expected {expected_model}, got {front.get('model')}"
         )
+    agent_mode = stat.S_IMODE(path.stat().st_mode)
+    if agent_mode != 0o600:
+        raise RuntimeError(f"AGENT.md mode is {oct(agent_mode)}, expected 0o600")
     allowed = front.get("allowed-tools", [])
     if set(allowed) != {"read", "grep", "glob"}:
         raise RuntimeError(f"Profile allowed-tools is not read-only: {allowed}")
@@ -200,7 +204,7 @@ def _verify_profile(canary: Path, expected_model: str) -> str:
 
 
 def _find_hook_command(canary: Path) -> list[str] | None:
-    hooks_file = canary / ".devin" / "hooks.json"
+    hooks_file = canary / ".devin" / "hooks.v1.json"
     if not hooks_file.exists():
         return None
     config = json.loads(hooks_file.read_text(encoding="utf-8"))
@@ -219,7 +223,7 @@ def _verify_existing_hooks_preserved(canary: Path) -> None:
     expected = os.environ.get("GOAL_DEVIN_EXPECTED_EXISTING_HOOK_COMMAND")
     if not expected:
         return
-    hooks_file = canary / ".devin" / "hooks.json"
+    hooks_file = canary / ".devin" / "hooks.v1.json"
     if not hooks_file.exists():
         raise RuntimeError("Existing hooks fixture not present at run time")
     if expected not in hooks_file.read_text(encoding="utf-8"):
