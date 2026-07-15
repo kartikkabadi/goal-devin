@@ -45,7 +45,9 @@ tool
 permission
 ```
 
-These map naturally to the planned Goal Devin `ultra` dashboard renderer.
+These are Devin CLI internal theme tokens. Goal Devin does not implement a
+dashboard renderer; any future status UI should reuse the same semantic names
+without copying proprietary visuals.
 
 ## Modes
 
@@ -64,7 +66,9 @@ This implies at least light, dark, and terminal-adaptive modes, plus a selection
 
 ## Recommendation for Goal Devin
 
-Adopt the same token names where practical, but do not copy proprietary visuals. A minimal `ultra` theme should support:
+Adopt the same token names where practical, but do not copy proprietary visuals.
+The `ultra` dashboard theme idea is **superseded** by the corrected product
+scope. If a future Goal Devin status UI ever needs theming, it should support:
 
 - `NO_COLOR` / `CLICOLOR=0` fully disables ANSI.
 - `--theme dark|light|terminal`.

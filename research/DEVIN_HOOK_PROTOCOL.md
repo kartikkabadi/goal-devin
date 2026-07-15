@@ -104,5 +104,10 @@ A command hook may print a JSON object:
 
 ## Implications for Goal Devin
 
-- Goal Devin does not currently use hooks. A future Rust rewrite could optionally emit `PreToolUse`/`PostToolUse` events to its own hook layer, but should not rely on undocumented fields.
-- If Goal Devin adds its own `ultra` workflow runtime, it may implement its own `agent()` hooks (pre/post agent) separate from Devin CLI hooks.
+- Goal Devin does not currently use hooks. The native-integration trial will use
+  the Devin CLI's documented `PreToolUse`/`PostToolUse` command hooks as a
+  read-only observation seam; it must not copy secret-bearing user/project
+  config to install them.
+- The `ultra` workflow runtime and `agent()` hooks are **superseded** historical
+  proposals. Goal Devin orchestrates the `devin` CLI via native mode and
+  subagents, not a separate workflow runtime.

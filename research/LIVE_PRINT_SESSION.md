@@ -67,7 +67,7 @@ From `devin list --format json` run immediately after the session:
 ]
 ```
 
-Session ID source: `devin list --format json`, first element, `id` field.
+Session ID source for this test: `devin list --format json`, first element, `id` field. This is a fallback heuristic; the preferred explicit source is the ATIF export `session_id` (or, for ACP mode, the `sessionId` returned by `session/new`).
 
 ## ATIF export metadata (OBSERVED LIVE)
 
@@ -113,15 +113,17 @@ Result: `ok` (exit 0).
 | `devin -p` accepts `--model swe-1-7` and `--permission-mode accept-edits` | **OBSERVED LIVE** |
 | The session creates a row in `devin list` with `id`, `short_id`, `working_directory`, `title`, `last_activity_at` | **OBSERVED LIVE** |
 | The edit is applied to `fib.py` | **OBSERVED LIVE** |
-| Export produces `ATIF-v1.7` with `model_name` `SWE-1.7` | **OBSERVED LIVE** |
+| Export produces `ATIF-v1.7` with `session_id` and `model_name` `SWE-1.7` | **OBSERVED LIVE** |
 | The function logic is preserved | **OBSERVED LIVE** |
 
 ## Notes for Goal Devin
 
 - `devin -p` is a valid, low-cost way to run a single deterministic turn and inspect the diff.
-- `devin list --format json` returned the new session as the first element in this test. That supports, but does not prove, the `latest_session_id()` assumption.
+- `devin -p --export <path>` produces an ATIF file containing the new `session_id` and the effective root model. This is the preferred explicit identity source for print mode.
+- `devin list --format json` returned the new session as the first element in this test. That supports, but does not prove, the `latest_session_id()` assumption; use it only as a fallback.
 - The `--model` value is passed through to the agent and recorded in ATIF (`SWE-1.7`).
 - `--permission-mode accept-edits` auto-approved the harmless file edit without an interactive prompt.
+- Identity hierarchy: ATIF export (or ACP `session/new`) is preferred; `devin list` is a fallback with a known race.
 
 ## Known race in `latest_session_id()`
 

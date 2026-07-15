@@ -222,11 +222,20 @@ Each iteration appends a delimiter:
 - `goal`, `resume`, `status`, `logs`, `version` commands.
 - `NO_COLOR` support.
 
-## 19. Behavior that should intentionally change later
+## 19. Superseded historical proposals
 
-- Add a dynamic workflow runtime (`agent`/`parallel`/`pipeline`) and an `ultra` command.
-- Add structured output / JSON schema parsing for agent handoff.
-- Add concurrency and per-agent worktrees.
-- Add deterministic journal/resume at the workflow level (not just session level).
-- Add a live dashboard / native TUI option for workflow progress.
-- Replace single linear continuation with planner-generated workflow scripts.
+Earlier drafts proposed a dynamic workflow runtime (`agent`/`parallel`/`pipeline`),
+an `ultra` command, planner-generated workflow scripts, and a live Goal Devin
+dashboard. These are **superseded** by the corrected product scope in
+`research/PRODUCT_SCOPE.md` and the native-integration trial contract in
+`research/NATIVE_INTEGRATION_TRIAL.md`.
+
+The canonical future direction is:
+
+- Preserve and harden the existing `goal`/`resume` loop.
+- Add a `goal-devin dev` native mode that launches the genuine `devin` TUI with
+  Goal Devin-owned status, policy, and verification.
+- Use native Devin subagents for in-session work; use independent `devin -p`
+  sessions only for explicitly independent Goal Devin jobs.
+- No `agent()`/`parallel()`/`pipeline()` workflow scripting DSL and no `ultra`
+  command.

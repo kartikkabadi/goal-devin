@@ -1,7 +1,8 @@
-# Goal Devin — Research Summary (Phase R0.5)
+# Goal Devin — Research Summary (Phase R0.6 / R0.7)
 
 This summary documents the corrected product scope and the live Devin
-integration evidence collected in Phase R0.5. Phase R0 was the initial
+integration evidence collected in Phase R0.5, refined by the R0.6 trial
+contract and the R0.7 independent-review corrections. Phase R0 was the initial
 baseline; see the commit history for those documents.
 
 ## 1. Corrected product scope
@@ -36,15 +37,25 @@ Full scope: `research/PRODUCT_SCOPE.md`.
   live: `title`, `task`, `profile`, `is_background`.
 - **Model behavior**: `swe-1-7` is a valid identifier for the installed binary.
   The native TUI and ATIF export confirm the effective model `SWE-1.7`.
-- **Public interfaces**: `devin list --format json` returns `id`, `short_id`,
-  `working_directory`, `working_directory_display`, `last_activity_at`,
-  `last_activity_ago`, `title`. The first element appears to be the newest
-  session in the tested environment, but full concurrency safety is unproven.
+- **Session identity**: `devin -p --export <path>` produces an ATIF file
+  containing the new `session_id` and the effective root model
+  (`model_name`). `devin acp` `session/new` returns an explicit `sessionId`.
+  Both are **OBSERVED LIVE** and preferred over `devin list --format json`,
+  which is a fallback heuristic with a known concurrency race. Native TUI
+  `--export` support is still unproven.
 - **Hooks**: Observation-only `PreToolUse`/`PostToolUse` hooks are viable and
-  expose `tool_name`, `tool_input`, `tool_use_id`, `tool_response`.
+  expose `tool_name`, `tool_input`, `tool_use_id`, `tool_response`. Trial
+  hook injection must not copy or merge user/project config that may
+  contain secrets; it must use a project hook file in the disposable canary
+  or a hook-only `--config` capability probe.
 - **Native TUI**: The TUI enters alternate screen, uses `crossterm` terminal
   sequences (cursor hide, bracketed paste, mouse, Kitty keyboard, synchronized
   updates), displays model `SWE-1.7`, and exits cleanly on `/exit`.
+- **Trial contract**: The native-integration trial uses a spool-directory event
+  transport, documented-only `AGENT.md` frontmatter, project-only or hook-only
+  `--config` hook installation, and symmetrical Python/Rust candidates under
+  `experiments/native-launcher-{python,rust,testkit}/`. It does not copy or
+  merge secret-bearing user/project config.
 - **Authentication**: `devin -p` requires stored credentials in
 `~/.local/share/devin/credentials.toml` (or a completed `devin auth login`);
 `WINDSURF_API_KEY` alone is not sufficient for `devin -p` but is used by

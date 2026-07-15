@@ -1,4 +1,4 @@
-# Goal Devin — Native Integration Trial (R0.6)
+# Goal Devin — Native Integration Trial (R0.6 / R0.7)
 
 This document is the final trial contract before implementation begins. It
 replaces the superseded `goal-devin ultra --script` trial and describes the
@@ -7,7 +7,9 @@ identified in Phase R0.5.
 
 The trial is **language-neutral** and will be executed twice: once as a Python
 candidate (R1A) and once as a Rust candidate (R1B). The final language decision
-is made in R1C after a measured comparison, not before.
+is made in R1C after a measured comparison, not before. R0.7 corrected the
+config, hook transport, custom-profile, and candidate-structure details after an
+independent review.
 
 ## 1. Corrected product scope to preserve
 
@@ -45,7 +47,9 @@ Rationale:
   `watch`.
 
 The command name is **provisional** until the trial completes and the language
-and integration approach are approved.
+and integration approach are approved. During R1A and R1B each candidate may
+expose a candidate-local executable that is compatible with this interface, but
+neither becomes the installed production command before R1C.
 
 ## 3. Launcher lifecycle
 
@@ -67,7 +71,9 @@ The supervisor must:
 1. Resolve the real `devin` executable.
 2. Validate the selected model and permission mode.
 3. Create one private runtime directory.
-4. Create one generated temporary Devin config.
+4. Install the Goal Devin observation hook through a project hook file in the
+   disposable canary (for the live canary) or a hook-only `--config` capability
+   probe (for the installed-version test).
 5. Create one temporary custom subagent profile.
 6. Start the read-only sidecar.
 7. Spawn `devin` with inherited `stdin`, `stdout`, and `stderr`.
@@ -91,39 +97,81 @@ isatty(child stderr) = true
 Goal Devin must not read, transform, buffer, mirror, or redraw the native TUI
 output. It must not inject keystrokes or simulate terminal input.
 
-## 4. Temporary config design
+## 4. Hook installation strategy
 
 The trial must preserve the user's real `HOME` and Devin credential storage.
-It must not create a temporary `HOME` to hold Devin configuration.
+It must not create a temporary `HOME` and must not copy or merge the user's
+complete Devin configuration into a runtime file. User and project-local Devin
+configuration may contain secrets such as MCP environment variables.
 
-Instead, the launcher creates a temporary merged config and passes it to the
-native process:
+### Live disposable-canary trial
 
-```text
-devin --config <goal-devin-generated-config> ...
+For the live canary:
+
+1. Use a documented project hook source such as `.devin/hooks.v1.json`
+   (or `.devin/hooks.json` if that is the documented filename for the installed
+   `devin` version).
+2. Create or modify files only inside the disposable canary repository.
+3. If the hook file already exists, record its exact bytes, restore it exactly
+   after the test, and clean up any added Goal Devin entries.
+4. The hook file must contain only the Goal Devin observation hook and must not
+   copy credentials, user config, or project config.
+5. Remove the file after the test.
+
+Example minimal project hook file:
+
+```json
+{
+  "PreToolUse": [
+    {
+      "matcher": "",
+      "hooks": [
+        {
+          "type": "command",
+          "command": "/path/to/goal-devin-hook",
+          "timeout": 5
+        }
+      ]
+    }
+  ],
+  "PostToolUse": [
+    {
+      "matcher": "",
+      "hooks": [
+        {
+          "type": "command",
+          "command": "/path/to/goal-devin-hook",
+          "timeout": 5
+        }
+      ]
+    }
+  ]
+}
 ```
 
-The generated config must:
+### Installed-version capability probe
 
-1. Start from the existing effective user config where safely available.
-2. Preserve unrelated user configuration.
-3. Preserve existing hooks.
-4. Append one uniquely identified Goal Devin observation hook.
-5. Never copy credentials into the config.
-6. Never contain authentication tokens.
-7. Be readable only by the current user.
-8. Live in the private Goal Devin runtime directory.
-9. Be deleted after the run.
-10. Be recoverable as stale Goal Devin-owned state after an abnormal crash.
+For the installed-version test, create a **hook-only** config file that
+contains nothing except a Goal Devin observation hook and pass it explicitly:
 
-The Goal Devin hook must be appended to the `hooks` object without replacing any
-existing user hooks array. The launcher must not mutate the user's permanent
-config, project hook configuration, or Devin credential store.
+```text
+devin --config <hook-only-config> ...
+```
 
-Config-precedence behavior between `--config`, project `.devin/config.json`,
-user `~/.config/devin/config.json`, and `AGENT.md` frontmatter is currently
-unresolved. The trial must document observed behavior honestly and include a
-specific test that verifies the Goal Devin hook is actually invoked.
+The probe must:
+
+1. Verify whether `--config` augments or replaces the normal user/project hook
+   sources.
+2. Observe at least one real hook event to confirm the Goal Devin hook is
+   active.
+3. Use the native `/hooks` interface where useful to confirm the loaded hook
+   configuration.
+4. Record the observed precedence behavior.
+5. Delete the hook-only config after the probe.
+
+Do not copy secret-bearing user or project configuration under any
+circumstance. Production-grade hook injection remains out of scope until R1C
+chooses a safe supported seam.
 
 ## 5. Private runtime directory
 
@@ -132,8 +180,9 @@ Use a directory structure conceptually equivalent to:
 ```text
 ~/.goal-devin/runtime/<run-id>/
 ├── manifest.json
-├── devin-config.json
-├── hook-events.jsonl
+├── hook-only-config.json
+├── events/
+│   └── <event-id>.json
 ├── sidecar.pid
 └── summary.json
 ```
@@ -149,7 +198,7 @@ Requirements:
 - No authorization headers.
 - No full session transcript.
 - Bounded event sizes.
-- Bounded event-file growth.
+- Bounded number of event files and total directory size.
 - Schema version on persisted JSON.
 - Only one process may own a run.
 - Every generated path must be recorded in `manifest.json`.
@@ -159,37 +208,43 @@ remains research-only.
 
 ## 6. Hook transport
 
-Use the simplest reliable language-neutral transport for the trial:
+Use a spool directory as the primary multi-writer hook transport:
 
 ```text
 Devin invokes tiny hook process
         ↓
 hook sanitizes event
         ↓
-one bounded JSON line appended atomically
+hook writes one temporary JSON file
         ↓
-sidecar tails the JSONL file
+hook atomically renames it to events/<event-id>.json
         ↓
-sidecar updates summary
+sidecar observes newly renamed event files
+        ↓
+sidecar validates schema and updates summary
 ```
 
-The hook must:
+For each hook invocation the hook must:
 
-- Read exactly one JSON object from stdin.
-- Accept only a bounded payload.
-- Extract only approved fields.
-- Redact before writing.
-- Use one append operation for each JSON line.
-- Never block or rewrite a tool.
-- Never return updated input.
-- Never approve permissions.
-- Never inject context.
-- Never perform network I/O.
-- Exit zero even if the sidecar is absent.
-- Complete within a strict timeout.
-- Fail open.
+1. Read exactly one JSON object from stdin.
+2. Accept only a bounded payload.
+3. Extract only approved fields.
+4. Redact before writing.
+5. Generate a unique event identifier.
+6. Write to a temporary file inside the spool directory.
+7. Flush and close it.
+8. Atomically rename it to its final `.json` name.
+9. Exit zero.
 
-The first approved event fields are limited to:
+The sidecar must:
+
+- Observe newly renamed event files in the spool directory.
+- Validate each file against the approved event schema.
+- Update its in-memory summary.
+- Record which event files were consumed.
+- Remain a separate failure domain; killing it must not stop `devin`.
+
+The approved event fields are limited to:
 
 ```json
 {
@@ -215,6 +270,17 @@ The hook must not persist:
 
 Where correlation is needed, store a digest rather than the raw identifier.
 
+Requirements:
+
+- No shared-writer corruption.
+- Duplicate-safe event identifiers.
+- Bounded number and total size of event files.
+- Fail open.
+- No network access.
+- No raw prompts, commands, output, paths, credentials, or session IDs.
+- Sidecar absence must not affect `devin`.
+- Cleanup removes only files listed in the run manifest.
+
 ## 7. Custom-profile handling
 
 The temporary custom profile is Goal Devin-owned, transparent, and
@@ -232,33 +298,47 @@ Write it under the supported project profile location:
 .devin/agents/<profile-id>/AGENT.md
 ```
 
+Use only documented `AGENT.md` frontmatter fields. Do not rely on unknown
+frontmatter being accepted.
+
+Example minimal `AGENT.md`:
+
+```markdown
+---
+name: goal-devin-worker-<nonce>
+description: Goal Devin read-only worker for the native integration trial
+model: <exact-worker-model>
+allowed-tools:
+  - read
+  - grep
+  - glob
+permissions:
+  deny:
+    - write
+    - edit
+---
+
+<!-- goal-devin-generated: true; run-id: <run-id> -->
+
+You are a Goal Devin trial worker. Use the selected model and follow project
+instructions. Do not perform destructive operations outside the current task.
+```
+
 Requirements:
 
 - Explicit exact `model:` frontmatter matching the user-selected worker model.
-- Generated-file marker (`goal-devin-generated: true`).
-- Run ID marker (`goal-devin-run-id: <run-id>`).
-- Minimal tools and permissions suitable for a harmless trial.
+- Documented `name` and `description` fields.
+- Narrow tool policy (`allowed-tools`) and permission deny-list suitable for a
+  harmless, read-only trial.
 - No credentials.
 - No hidden instructions unrelated to the trial.
+- Ownership recorded in the runtime manifest and a non-frontmatter comment.
 - Remove only the generated profile directory.
 - Never remove `.devin/agents`.
 - Never remove user profiles.
 - Preserve the profile after an abnormal failure only when needed for
   diagnosis, and mark it stale.
 - Provide safe stale-profile cleanup on the next run.
-
-Example minimal `AGENT.md`:
-
-```markdown
----
-model: <exact-user-selected-model>
-goal-devin-generated: true
-goal-devin-run-id: <run-id>
----
-
-You are a Goal Devin trial worker. Use the selected model and follow project
-instructions. Do not perform destructive operations outside the current task.
-```
 
 ## 8. Profile loading proof
 
@@ -271,9 +351,10 @@ The fake executable verifies:
 
 - Profile path exists before launch.
 - Profile frontmatter contains the exact selected worker model.
-- Generated config points to the Goal Devin hook.
+- Documented tool policy is narrow and read-only.
+- The Goal Devin hook is configured and reachable.
 - Exact root `--model` reaches `devin`.
-- Profile is removed after exit.
+- Profile is removed after exit (or marked stale after an abnormal failure).
 
 ### Explicit live canary test
 
@@ -282,7 +363,7 @@ A bounded live canary must:
 1. Launch with root model `swe-1-7`.
 2. Load the generated Goal Devin profile.
 3. Invoke it once for a harmless read-only task.
-4. Capture the `run_subagent` hook event.
+4. Capture the `run_subagent` hook event in the spool directory.
 5. Verify the hook event references the generated profile ID.
 6. Record configured versus observed-effective model honestly.
 7. Exit cleanly.
@@ -302,23 +383,37 @@ Try Python; use Rust only if Python fails.
 ```
 
 That is biased because basic subprocess launching is expected to work in either
-language. Both candidates implement the same small contract.
+language. Both candidates implement the same small contract and share the same
+fixtures, test runner, and measurement script.
 
-### Candidate A — Python
-
-A contained implementation using the current Python package.
-
-### Candidate B — Rust
-
-A contained launcher prototype that does **not** port the existing
-autonomous `GoalLoop`. It may live temporarily under:
+### Candidate locations
 
 ```text
-experiments/native-launcher-rust/
+experiments/
+  native-launcher-python/   # R1A
+  native-launcher-rust/     # R1B
+  native-launcher-testkit/  # shared fixtures, fake devin, canary, test runner
 ```
 
-or another clearly isolated location. It must not become the primary package
-during the trial.
+Neither candidate becomes the installed production command before R1C. Each may
+expose a candidate-local executable compatible with the provisional `goal-devin
+dev` interface.
+
+### Shared testkit
+
+Both candidates must use:
+
+- The same fake `devin` executable.
+- The same canary repository fixture.
+- The same existing-user-hook fixture.
+- The same generated-profile fixture.
+- The same hook event spool schema.
+- The same black-box test runner.
+- The same failure scenarios.
+- The same measurement script.
+
+Candidate-specific unit tests are additional; they do not replace the shared
+contract.
 
 ### Evaluation criteria
 
@@ -356,12 +451,14 @@ The implementation is split into three later phases.
 
 ### R1A — Python native-integration candidate
 
-Implement only the Python candidate. Stop after its exact-head review.
+Implement only the Python candidate under
+`experiments/native-launcher-python/`. Stop after its exact-head review.
 
 ### R1B — Rust native-integration candidate
 
-Implement only the equivalent Rust candidate. Do not port existing Goal Devin
-behavior. Stop after its exact-head review.
+Implement only the equivalent Rust candidate under
+`experiments/native-launcher-rust/`. Do not port existing Goal Devin behavior.
+Stop after its exact-head review.
 
 ### R1C — Differential evaluation and language decision
 
@@ -373,26 +470,26 @@ approved.
 
 The Python candidate must prove:
 
-1. `goal-devin dev` resolves `devin`, validates model/permission mode, creates
-   the runtime directory, generates a temporary config, writes a temporary
-   custom profile, and spawns `devin` with inherited `stdin`/`stdout`/`stderr`.
+1. The candidate-local `dev` executable resolves `devin`, validates
+   model/permission mode, creates the runtime directory, installs the
+   observation hook, writes a temporary custom profile, and spawns `devin` with
+   inherited `stdin`/`stdout`/`stderr`.
 2. The supervisor stays alive and does not call `os.execvp`.
-3. A read-only sidecar runs in a separate process and tails the JSONL hook
-   events file.
-4. The generated `devin` config points `PreToolUse`/`PostToolUse` at the Goal
-   Devin hook.
-5. The hook appends sanitized events to `hook-events.jsonl` inside the runtime
-   directory.
-6. At least one `run_subagent` or `PostToolUse` event is captured in the live
+3. A read-only sidecar runs in a separate process and observes newly renamed
+   event files in the spool directory.
+4. The hook writes sanitized events as atomic `.json` files in the runtime
+   `events/` directory.
+5. At least one `run_subagent` or `PostToolUse` event is captured in the live
    canary and reflected in `summary.json`.
-7. The generated custom profile exists before `devin` starts, contains the
-   exact worker model in frontmatter, and is removed after exit (or marked
-   stale after an abnormal failure and safely cleaned up later).
-8. Existing user hooks and config are preserved and not mutated.
-9. Credentials remain accessible to `devin` but never appear in the generated
-   config, runtime files, logs, or test artifacts.
-10. Normal exit, launch failure, and `SIGINT` interruption all leave only
-    Goal Devin-owned files, restore the terminal, and print a bounded summary.
+6. The generated custom profile exists before `devin` starts, contains the
+   exact worker model in frontmatter, uses only documented frontmatter fields,
+   and is removed after exit (or marked stale after an abnormal failure and
+   safely cleaned up later).
+7. Existing user hooks and config are preserved and not mutated.
+8. Credentials remain accessible to `devin` but never appear in generated files,
+   runtime files, logs, or test artifacts.
+9. Normal exit, launch failure, and `SIGINT` interruption all leave only
+   Goal Devin-owned files, restore the terminal, and print a bounded summary.
 
 ### R1B acceptance contract
 
@@ -401,10 +498,33 @@ The Rust candidate must prove the same items as R1A, plus:
 1. The Rust candidate must not replace the supervisor process with `exec`.
 2. It must produce the exact same argv and runtime artifacts as the Python
    candidate.
-3. It must run from `experiments/native-launcher-rust/` (or another isolated
-   directory) without disturbing the existing Python package.
-4. It must provide its own fake-Devin and live-canary test harness that
-   verifies the same hook, profile, and TTY contracts.
+3. It must run from `experiments/native-launcher-rust/` without disturbing the
+   existing Python package.
+4. It must reuse the shared testkit; it must not require a separate
+   independent acceptance harness.
+
+### R1C measurement methodology
+
+All measurements must be reproducible and performed in identical conditions:
+
+- Five or more cold starts.
+- Five or more warm starts.
+- Median and p95 startup time.
+- Idle RSS after a fixed interval.
+- Peak RSS during the canary.
+- Release-mode Rust binary.
+- Normal non-debug Python execution.
+- Identical machine and environment.
+- Identical `devin` executable.
+- Identical fake/live tasks.
+- Exact measurement boundaries.
+- Source LOC excluding tests and generated files.
+- Test LOC.
+- Build/install time.
+- Final artifact size.
+- Signal and cleanup behavior.
+
+Do not use subjective impressions as a deciding metric.
 
 ## 11. Black-box acceptance contract
 
@@ -442,6 +562,7 @@ Both candidates must prove the following contract before R1C:
 - A full dashboard or native TUI reimplementation.
 - PTY interception, keyboard injection, or screen scraping.
 - A full Rust rewrite of Goal Devin.
+- Production-grade hook injection before R1C.
 
 ## 13. Verification plan
 
@@ -449,21 +570,32 @@ Both candidates must prove the following contract before R1C:
 2. Run Ruff check and format check:
    `uv run ruff check . && uv run ruff format --check .`.
 3. Run the deterministic fake-Devin test for the candidate.
-4. Run a bounded manual live canary with `goal-devin dev --model swe-1-7` in a
-   disposable canary repository.
+4. Run a bounded manual live canary with the candidate-local `dev` executable and
+   `--model swe-1-7` in a disposable canary repository.
 5. Verify the sidecar captured at least one sanitized `PostToolUse` or
-   `run_subagent` event.
+   `run_subagent` event in the spool directory.
 6. Verify the generated profile directory under `.devin/agents/` was removed.
 7. Verify `goal-devin status` and `goal-devin logs` still work.
 8. Scan the diff and runtime artifacts for credentials before final review.
 
-## 14. Known unknowns
+## 14. Session identity for native mode
 
-- Exact config-precedence behavior when `--config`, project config, user config,
-  and `AGENT.md` frontmatter all interact.
-- Whether the hook transport must be a single executable file or can be a
-  shell/Python script invoked by `devin`.
-- Exact Devin CLI behavior when the generated config is unreadable or contains
+The native `dev` trial should determine the session ID using the hierarchy in
+`research/DEVIN_SESSION_IDENTITY.md`:
+
+1. Print mode: pass a Goal Devin-owned ATIF export path and parse `session_id`.
+2. ACP mode: use the `sessionId` returned by `session/new`.
+3. Native TUI: test whether the documented global `--export` flag produces usable
+   ATIF during an interactive session; do not claim support until observed.
+4. `devin list --format json`: fallback heuristic only, with its known race.
+
+## 15. Known unknowns
+
+- Whether the documented global `--export` flag produces usable ATIF during an
+  interactive TUI session.
+- Whether `devin --config <hook-only-config>` augments or replaces normal
+  user/project hook sources.
+- Exact Devin CLI behavior when the hook-only config is unreadable or contains
   a hooks entry for an event not supported by the installed binary.
 - Cross-platform runtime directory and signal handling differences (Linux,
   macOS).

@@ -85,17 +85,19 @@ another process creates a newer session before Goal Devin lists.
 **Location**: `research/DEVIN_SESSION_IDENTITY.md`,
 `research/LIVE_PRINT_SESSION.md`, `research/LIVE_SESSION_RESUME.md`.
 
-### Config precedence with generated `--config`
+### Explicit `--config` override interaction
 
-**What we could not do**: Determine how `devin --config <generated>` interacts
-with project `.devin/config.json`, user `~/.config/devin/config.json`, and
-`AGENT.md` frontmatter.
+**What we could not do**: Determine how `devin --config <hook-only-config>`
+interacts with the normal documented project, user, and `AGENT.md` hook sources.
 
-**Why**: Hook and profile loading were tested in isolated `HOME` setups; merged
-config behavior was not empirically explored.
+**Why**: Normal config and hook collection precedence is publicly documented, but
+the effect of an explicit `--config` file on those normal sources was not
+empirically tested. The trial must use a project hook file in the disposable
+canary or a hook-only `--config` capability probe rather than copying or merging
+secret-bearing user/project config.
 
-**Impact**: A Goal Devin-generated config might override user hooks or fail to
-activate the Goal Devin observation hook depending on Devin's precedence rules.
+**Impact**: A hook-only `--config` might augment or replace normal sources; the
+trial must observe and record which behavior occurs.
 
 **Location**: `research/NATIVE_INTEGRATION_TRIAL.md`.
 

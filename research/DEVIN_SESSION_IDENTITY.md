@@ -1,10 +1,23 @@
 # Devin CLI — Session Identity Research
 
-## Public identity seam
+## Preferred identity hierarchy
 
-The only public way to discover a newly created session ID is **`devin list --format json`**. When no sessions exist it returns `[]`; otherwise it returns an array of session objects.
+Goal Devin should determine the session ID of a newly created session in the
+following order:
 
-### Known fields
+1. **Print mode with ATIF export** — pass a Goal Devin-owned ATIF path to
+   `devin -p --export <path>` and parse `session_id` from the exported file.
+2. **ACP `session/new`** — use the `sessionId` field returned by the
+   `devin acp` JSON-RPC `session/new` method.
+3. **Native TUI `--export`** — test whether the documented global `--export`
+   flag produces usable ATIF during an interactive TUI session. This is
+   **unproven** and must be verified in R1A/R1B.
+4. **`devin list --format json` fallback** — select the newest matching session
+   by `working_directory`. This is a heuristic with a known concurrency race.
+
+Do not parse `sessions.db`; it is a private implementation detail.
+
+## Known fields
 
 From the `sessions` SQLite table (observed via `sqlite3` stdlib):
 
@@ -25,7 +38,31 @@ From the `sessions` SQLite table (observed via `sqlite3` stdlib):
 | `hidden` | INTEGER | Visibility flag. |
 | `metadata` | TEXT | Opaque metadata blob. |
 
-The public `devin list --format json` output is **not** documented to expose all columns**, but Goal Devin only requires `id` and `working_directory`.
+The public `devin list --format json` output is **not** documented to expose all
+columns, but Goal Devin only requires `id` and `working_directory` when using
+that seam.
+
+## ATIF export identity (OBSERVED LIVE)
+
+A separate `devin -p --export /path/to/file.atif ...` run produced an ATIF file
+with:
+
+- `schema_version`: `ATIF-v1.7`
+- `session_id`: the new session ID
+- `agent.name`: `devin`
+- `agent.version`: the installed CLI version
+- `agent.model_name`: the effective root model (e.g. `SWE-1.7`)
+
+The ATIF export path can be Goal Devin-owned (under `~/.goal-devin/runtime/`)
+and deleted after the session ID is extracted. No credentials are required in
+the export file for identity resolution.
+
+## ACP `session/new` identity (OBSERVED LIVE)
+
+The `devin acp` JSON-RPC handshake returns a `sessionId` in the `session/new`
+response. This is a stable, explicit identifier. `devin acp` consumes tokens and
+was not exercised for a full turn, but the `session/new` response shape was
+observed.
 
 ## Goal Devin resolution algorithm (current Python)
 
@@ -70,7 +107,8 @@ The evidence does **not** yet prove:
 - Safety when another process creates a newer session before Goal Devin lists.
 - Safety across all Devin versions.
 
-Classify this as a known race to harden later.
+Classify this as a known race to harden later. Prefer ATIF or ACP identity when
+available.
 
 ## Empirical test with fake `devin`
 
@@ -83,25 +121,32 @@ This matches the intended behavior in the controlled, single-session test.
 
 ## Sharp edge: `devin list` scope
 
-`devin list` help says "List sessions in the current directory". If the implementation filters by the cwd of the `list` process, then running `devin list` from the wrapper's cwd (the main repo) could fail to see a session created in a worktree cwd. In the fake test the fake returns all sessions globally, so resolution succeeded. **This is a potential real-world race/bug** and must be tested with the real binary.
+`devin list` help says "List sessions in the current directory". If the
+implementation filters by the cwd of the `list` process, then running `devin
+list` from the wrapper's cwd (the main repo) could fail to see a session created
+in a worktree cwd. In the fake test the fake returns all sessions globally, so
+resolution succeeded. **This is a potential real-world race/bug** and must be
+tested with the real binary.
 
 ## Alternative identity methods considered
 
 | Method | Status | Notes |
 |--------|--------|-------|
+| ATIF export (`devin -p --export`) | **OBSERVED LIVE** | Contains `session_id` and effective model. Preferred for print mode. |
+| ACP `session/new` | **OBSERVED LIVE** | Returns `sessionId` explicitly. Preferred for ACP mode. |
+| Native TUI `--export` | **UNKNOWN** | Documented flag; must be tested in R1A/R1B before use. |
 | Explicit CLI output | **NOT AVAILABLE** | `devin -p` does not print the session id. |
 | JSON output (`--output-format`) | **NOT AVAILABLE** | `devin --help` does not list `--output-format` or `--json` for the main `devin -p` flow. |
-| `devin list --format json` | **PUBLIC, DOCUMENTED** | Used by Goal Devin. |
-| ATIF export | **UNKNOWN** | `devin --export` exists but was not tested. |
-| ACP result | **UNKNOWN** | `devin acp` `session/new` returns `sessionId` via JSON-RPC; not used by current Goal Devin. |
-| Filesystem artifacts | **UNKNOWN** | `sessions.db` contains the id but is not a public interface. |
-| Environment | **UNKNOWN** | No env var is set with the new session id. |
+| `devin list --format json` | **PUBLIC, DOCUMENTED** | Fallback heuristic with known race. |
+| Filesystem artifacts | **NOT AVAILABLE** | `sessions.db` contains the id but is not a public interface. |
+| Environment | **NOT AVAILABLE** | No env var is set with the new session id. |
 
 ## Recommendation
 
-Keep `devin list --format json` as the public seam, but treat `latest_session_id()`
-as a heuristic with a known concurrency race. Prefer explicit session IDs when
-available. Consider augmenting list resolution with `--all` or calling from the
-same cwd as the `devin -p` invocation to minimize scope mismatch. A future rewrite
-should **not** parse `sessions.db` directly because it is a private implementation
-detail.
+- Prefer explicit identity sources: ATIF export for print mode and ACP
+  `session/new` for ACP mode.
+- Treat `devin list --format json` as a fallback heuristic with a known
+  concurrency race.
+- Test native TUI `--export` behavior in R1A/R1B before relying on it.
+- Do not parse `sessions.db` directly because it is a private implementation
+  detail.

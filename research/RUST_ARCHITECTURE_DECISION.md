@@ -10,8 +10,10 @@ should be built before the trial described in
 
 The next implementation phase is split into:
 
-- **R1A** — Python native-integration candidate.
-- **R1B** — Rust native-integration candidate.
+- **R1A** — Python native-integration candidate in
+  `experiments/native-launcher-python/`.
+- **R1B** — Rust native-integration candidate in
+  `experiments/native-launcher-rust/`.
 - **R1C** — Differential evaluation and language decision.
 
 ## Question
@@ -32,9 +34,18 @@ Should the Goal Devin native launcher/sidecar be implemented in Python or Rust?
 
 ## Trial approach
 
-Both candidates must implement the same small contract documented in
-`research/NATIVE_INTEGRATION_TRIAL.md`. The language decision must be based on a
-measured comparison, not on:
+Both candidates implement the same small contract documented in
+`research/NATIVE_INTEGRATION_TRIAL.md`. They share a single testkit under
+`experiments/native-launcher-testkit/`:
+
+```text
+experiments/
+  native-launcher-python/   # R1A
+  native-launcher-rust/     # R1B
+  native-launcher-testkit/  # shared fake devin, canary, fixtures, runner
+```
+
+The language decision must be based on a measured comparison, not on:
 
 - Devin being written in Rust.
 - Existing Goal Devin being written in Python.
@@ -50,13 +61,15 @@ state machines.
 
 ### Candidate A — Python
 
-A contained implementation using the current Python package. It adds the
-`goal-devin dev` supervisor, sidecar, generated config, and temporary custom
-profile without disturbing the existing `goal`/`resume` loop.
+A contained implementation under `experiments/native-launcher-python/`. It adds
+a candidate-local `dev` executable, supervisor, sidecar, and temporary custom
+profile without disturbing the existing `goal`/`resume` loop or the production
+`goal-devin` package.
 
 Pros:
 
-- Uses the existing Python test harness, fake `devin` fixture, and package.
+- Uses the existing Python test harness and fake `devin` fixture through the
+  shared testkit.
 - Fastest path to a working end-to-end trial.
 - Easy to iterate and measure.
 
@@ -69,15 +82,10 @@ Cons:
 
 ### Candidate B — Rust
 
-A contained launcher prototype that does **not** port the existing
-autonomous `GoalLoop`. It may live temporarily under:
-
-```text
-experiments/native-launcher-rust/
-```
-
-or another clearly isolated location. It must not become the primary package
-during the trial.
+A contained launcher prototype under `experiments/native-launcher-rust/` that
+does **not** port the existing autonomous `GoalLoop`. It reuses the shared testkit
+and must prove the same hook, profile, and TTY contracts as the Python
+candidate. It must not become the primary package during the trial.
 
 Pros:
 
@@ -90,7 +98,8 @@ Cons:
 - Requires building the Rust project, dependency resolution, and a new test
   harness.
 - Re-implementing the `GoalLoop`/worktree/state layer would be out of scope.
-- Must prove the same hook, profile, and TTY contracts as the Python candidate.
+- Must reuse the shared testkit; it cannot rely on a separate independent
+  acceptance harness.
 
 ## Evaluation criteria
 
@@ -115,12 +124,37 @@ Both candidates must be evaluated on:
 - Developer ergonomics.
 - Resulting artifact size.
 
+## R1C measurement methodology
+
+All measurements must be reproducible and performed in identical conditions:
+
+- Five or more cold starts.
+- Five or more warm starts.
+- Median and p95 startup time.
+- Idle RSS after a fixed interval.
+- Peak RSS during the canary.
+- Release-mode Rust binary.
+- Normal non-debug Python execution.
+- Identical machine and environment.
+- Identical `devin` executable.
+- Identical fake/live tasks.
+- Exact measurement boundaries.
+- Source LOC excluding tests and generated files.
+- Test LOC.
+- Build/install time.
+- Final artifact size.
+- Signal and cleanup behavior.
+
+Do not use subjective impressions as a deciding metric. The full methodology is
+also recorded in `research/NATIVE_INTEGRATION_TRIAL.md`.
+
 ## Decision rule
 
 1. Run **R1A** (Python) and stop at its exact-head review.
 2. Run **R1B** (Rust) and stop at its exact-head review.
 3. Run **R1C**: execute the shared black-box contract against both candidates,
-   measure the criteria above, and write an architecture decision.
+   measure the criteria above using the shared methodology, and write an
+   architecture decision.
 4. Do **not** start the production integration until the R1C decision is
    approved.
 
@@ -167,5 +201,5 @@ Candidate crates:
 ## Conclusion
 
 Defer the Rust decision to R1C. Keep Python as the behavioral oracle. Run both
-candidates against the same native-integration contract, measure them, then
-decide.
+candidates against the same native-integration contract, measure them with the
+shared methodology, then decide.

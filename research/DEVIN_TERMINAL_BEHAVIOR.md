@@ -47,14 +47,22 @@ Source path `chisel/src/shell/pty_proxy.rs` strongly indicates Devin uses a PTY 
 
 ## Coexistence recommendation for Goal Devin
 
-Goal Devin should **not** write to the same TTY while `devin` is in interactive/alternate-screen mode. For the planned `ultra` dynamic-workflow TUI:
+Goal Devin should **not** write to the same TTY while `devin` is in
+interactive/alternate-screen mode. The `goal-devin dev` native mode gives the
+TTY entirely to `devin`; Goal Devin reads only sanitized hook events from the
+spool directory and prints a bounded summary after `devin` exits.
+
+The old `ultra` dynamic-workflow TUI idea is **superseded** by the corrected
+product scope in `research/PRODUCT_SCOPE.md` and the native-integration trial in
+`research/NATIVE_INTEGRATION_TRIAL.md`. If a future Goal Devin dashboard is ever
+added, it should:
 
 - Use `crossterm` or equivalent for ANSI sequences.
-- Enter alternate screen only when `--dashboard` is requested; default CLI mode should remain in normal screen.
-- Hide cursor while rendering dashboard, restore on exit.
+- Enter alternate screen only when explicitly requested; default CLI mode should remain in normal screen.
+- Hide cursor while rendering, restore on exit.
 - Use synchronized updates (`CSI ? 2026 h/l`) to prevent flicker.
 - Do **not** enable Kitty keyboard protocol or mouse mode unless needed; keep compatibility with generic terminals.
-- If `devin` subprocess is spawned in interactive mode, Goal Devin should either give it the TTY entirely (using `script`/`pty`) or run `devin -p`/`devin acp` non-interactively and render progress itself.
+- If `devin` is spawned interactively, give it the TTY entirely rather than sharing the alternate screen.
 
 ## Untested
 
