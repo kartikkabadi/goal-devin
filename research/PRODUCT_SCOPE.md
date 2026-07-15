@@ -8,7 +8,8 @@ This document replaces any prior product interpretation. It aligns Goal Devin wi
    - The `goal` and `resume` subcommands must continue to work exactly as they do today.
    - Per-cwd state, atomic state writes, `devin list` session resolution, worktree create/keep/remove rules, log format, exit codes, and env var defaults must be preserved.
 
-2. **Add an interactive mode that launches the genuine native Devin TUI.**
+2. **Add an interactive `dev` mode that launches the genuine native Devin TUI.**
+   - The provisional command is `goal-devin dev`.
    - `goal-devin` should be able to hand the terminal to `devin` (no argv translation to `devin -p`) so the user gets the real Devin interactive experience.
    - `devin` remains directly attached to the user's terminal.
 

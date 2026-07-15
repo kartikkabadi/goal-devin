@@ -218,6 +218,8 @@ The only model evidence visible to Goal Devin is the parent session's ATIF
 - Native subagents are the correct fan-out mechanism for work inside a session.
 - Goal Devin should not spawn independent `devin -p` sessions for ordinary
   parallel work; reserve those for Goal Devin-owned side jobs.
-- Custom profiles should only be used when the user explicitly provides one.
+- Goal Devin may generate temporary custom profiles when required for explicit,
+  visible session policy, provided they are session-scoped, clearly owned, narrowly
+  permissioned, and safely cleaned up.
 - Because effective subagent models are not visible, Goal Devin must rely on the
   documented model inheritance rules and the parent session model.

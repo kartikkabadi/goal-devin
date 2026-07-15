@@ -2,78 +2,139 @@
 
 ## Status
 
-**Final language decision is deferred until the native-integration trial
+**The final language decision is deferred until the native-integration trial
 completes.** The existing Python implementation remains the behavioral oracle
-and stable implementation. No major new workflow feature or Rust rewrite
-should be built before the trial described in `research/NATIVE_INTEGRATION_TRIAL.md`.
+and stable implementation. No major new workflow feature or production rewrite
+should be built before the trial described in
+`research/NATIVE_INTEGRATION_TRIAL.md`.
+
+The next implementation phase is split into:
+
+- **R1A** — Python native-integration candidate.
+- **R1B** — Rust native-integration candidate.
+- **R1C** — Differential evaluation and language decision.
 
 ## Question
 
-Should Goal Devin be rewritten in Rust?
+Should the Goal Devin native launcher/sidecar be implemented in Python or Rust?
 
 ## Evidence summary
 
-- The `devin` binary itself is a large (~133 MiB) statically-linked Rust program using `tokio`, `crossterm`, `clap`, `reqwest`, `tokio-tungstenite`, `tracing-subscriber`, and custom crates `chisel`/`chisel-agent`/`scrollback`.
-- Goal Devin's current Python implementation is small, stdlib-only, and passes 58 tests.
-- The corrected product scope (`research/PRODUCT_SCOPE.md`) prioritizes a native Devin TUI launcher, model selection passthrough, Goal Devin-owned status/policy, and native subagent usage over a workflow-scripting DSL or full rewrite.
+- The `devin` binary itself is a large (~133 MiB) statically-linked Rust
+  program using `tokio`, `crossterm`, `clap`, `reqwest`, `tokio-tungstenite`,
+  `tracing-subscriber`, and custom crates `chisel`/`chisel-agent`/`scrollback`.
+- Goal Devin's current Python implementation is small, stdlib-only, and passes
+  58 tests.
+- The corrected product scope (`research/PRODUCT_SCOPE.md`) prioritizes a native
+  Devin TUI launcher, model selection passthrough, Goal Devin-owned
+  status/policy, and native subagent usage over a workflow-scripting DSL or full
+  rewrite.
 
-## Options evaluated
+## Trial approach
 
-### A. Keep Python for the trial
+Both candidates must implement the same small contract documented in
+`research/NATIVE_INTEGRATION_TRIAL.md`. The language decision must be based on a
+measured comparison, not on:
 
-Pros:
+- Devin being written in Rust.
+- Existing Goal Devin being written in Python.
+- One candidate merely "working."
+- Subjective language preference.
 
-- Already works; existing tests pass.
-- Zero runtime deps; easy to install with `uv`/`pip`.
-- Fast iteration; contributor accessibility.
-- Can spawn `devin` directly with the user's terminal and run a read-only sidecar.
+The final decision rule is **not** "try Python; use Rust only if Python fails."
+Basic subprocess launching is expected to work in either language. The
+interesting differences are signal handling, TTY ownership, sidecar isolation,
+startup latency, idle memory, test complexity, packaging complexity,
+cross-platform prospects, and long-term ability to support ACP and rate-limit
+state machines.
 
-Cons:
+### Candidate A — Python
 
-- Packaging as a single binary is harder.
-- Long-running process supervision and TTY handling are workable but less robust than Rust.
-
-### B. Full Rust rewrite
-
-Pros:
-
-- Single native binary, easy distribution.
-- `tokio` + `crossterm`/`ratatui` align with the terminal behavior observed in `devin`.
-- Strong types for ACP JSON-RPC and workflow state.
-
-Cons:
-
-- Major rewrite risk; must preserve exact `devin -p`/`devin -r` argv matrices and state paths.
-- Larger binary; longer compile times; steeper contributor curve.
-- No evidence that Rust is *required* for the corrected feature set.
-
-### C. Rust launcher/sidecar with Python core
+A contained implementation using the current Python package. It adds the
+`goal-devin dev` supervisor, sidecar, generated config, and temporary custom
+profile without disturbing the existing `goal`/`resume` loop.
 
 Pros:
 
-- Keeps existing Python `GoalLoop`/state/worktree implementation.
-- Rust handles the terminal-owned `devin` spawn and read-only sidecar.
+- Uses the existing Python test harness, fake `devin` fixture, and package.
+- Fastest path to a working end-to-end trial.
+- Easy to iterate and measure.
 
 Cons:
 
-- Two runtimes to build and test; RPC or file-based coordination overhead.
-- Adds complexity before the integration contract is proven.
+- Requires Python in the user's environment (already required by `goal-devin`).
+- Less portable as a single static binary if distribution becomes a goal later.
+- Long-running process supervision and TTY handling are workable but less robust
+  than Rust.
 
-## Recommendation
+### Candidate B — Rust
 
-1. **Do not rewrite Goal Devin in Rust in the next phase.**
-2. **Run the Python native-integration trial first** (`research/NATIVE_INTEGRATION_TRIAL.md`).
-3. **Revisit Rust only if** the trial shows Python cannot reliably spawn `devin`, observe hooks, and clean up temp files, or if a single-binary distribution becomes an explicit requirement.
+A contained launcher prototype that does **not** port the existing
+autonomous `GoalLoop`. It may live temporarily under:
 
-Rationale:
+```text
+experiments/native-launcher-rust/
+```
 
-- The current Python code is small, correct, and well-tested.
-- The primary risk is integration correctness (argv, session identity, model passthrough, worktree lifecycle, ACP/hook behavior), not language performance.
-- Those integration risks are the same in Python and Rust; proving them in Python first is lower cost.
+or another clearly isolated location. It must not become the primary package
+during the trial.
+
+Pros:
+
+- Self-contained static binary, no Python dependency for the launcher.
+- Easier to reason about long-running process lifetimes and signal handling.
+- Aligns with the `devin` runtime stack (`tokio`, `crossterm`).
+
+Cons:
+
+- Requires building the Rust project, dependency resolution, and a new test
+  harness.
+- Re-implementing the `GoalLoop`/worktree/state layer would be out of scope.
+- Must prove the same hook, profile, and TTY contracts as the Python candidate.
+
+## Evaluation criteria
+
+Both candidates must be evaluated on:
+
+- Exact argv.
+- Native terminal ownership.
+- Signal behavior.
+- Sidecar isolation.
+- Hook latency.
+- Cleanup after normal exit.
+- Cleanup after launch failure.
+- Cleanup after signal interruption.
+- Stale-state recovery.
+- Startup latency.
+- Idle memory.
+- Added source complexity.
+- Test complexity.
+- Packaging complexity.
+- Cross-platform prospects.
+- Ability to support future ACP and rate-limit state machines.
+- Developer ergonomics.
+- Resulting artifact size.
+
+## Decision rule
+
+1. Run **R1A** (Python) and stop at its exact-head review.
+2. Run **R1B** (Rust) and stop at its exact-head review.
+3. Run **R1C**: execute the shared black-box contract against both candidates,
+   measure the criteria above, and write an architecture decision.
+4. Do **not** start the production integration until the R1C decision is
+   approved.
+
+The final language decision must be justified by the measured comparison, not
+by language bias or the fact that one candidate works.
 
 ## If Rust is chosen later
 
-Proposed workspace (provisional):
+If R1C selects Rust, the production integration should still keep the existing
+Python `GoalLoop`/worktree/state as the behavioral oracle initially and replace
+only the launcher/sidecar surface. The full rewrite of Goal Devin in Rust is
+out of scope for the trial and should be a separate, later decision.
+
+Proposed Rust workspace (provisional):
 
 ```text
 crates/
@@ -105,5 +166,6 @@ Candidate crates:
 
 ## Conclusion
 
-Defer the Rust decision. Keep Python as the behavioral oracle. Implement the
-native-integration trial in Python, then decide whether Rust is justified.
+Defer the Rust decision to R1C. Keep Python as the behavioral oracle. Run both
+candidates against the same native-integration contract, measure them, then
+decide.

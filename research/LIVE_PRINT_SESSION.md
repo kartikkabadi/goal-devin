@@ -119,6 +119,25 @@ Result: `ok` (exit 0).
 ## Notes for Goal Devin
 
 - `devin -p` is a valid, low-cost way to run a single deterministic turn and inspect the diff.
-- `devin list --format json` returns the new session as the first element, so Goal Devin's `latest_session_id()` logic is correct.
+- `devin list --format json` returned the new session as the first element in this test. That supports, but does not prove, the `latest_session_id()` assumption.
 - The `--model` value is passed through to the agent and recorded in ATIF (`SWE-1.7`).
 - `--permission-mode accept-edits` auto-approved the harmless file edit without an interactive prompt.
+
+## Known race in `latest_session_id()`
+
+The evidence supports:
+
+- `devin list --format json` returns newest-first in the tested environment.
+- A newly created isolated session appeared as the newest entry.
+- Explicit resume by known session ID is stable.
+
+The evidence does **not** yet prove:
+
+- Safety when two sessions start concurrently in one cwd.
+- Safety when list visibility is delayed.
+- Safety when timestamps collide.
+- Safety when another process creates a newer session before Goal Devin lists.
+- Safety across all Devin versions.
+
+Classify this as a known race to harden later. Where possible, prefer explicit
+session IDs over list-order heuristics.

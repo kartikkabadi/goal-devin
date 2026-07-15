@@ -38,7 +38,8 @@ Full scope: `research/PRODUCT_SCOPE.md`.
   The native TUI and ATIF export confirm the effective model `SWE-1.7`.
 - **Public interfaces**: `devin list --format json` returns `id`, `short_id`,
   `working_directory`, `working_directory_display`, `last_activity_at`,
-  `last_activity_ago`, `title`. The first element is the newest session.
+  `last_activity_ago`, `title`. The first element appears to be the newest
+  session in the tested environment, but full concurrency safety is unproven.
 - **Hooks**: Observation-only `PreToolUse`/`PostToolUse` hooks are viable and
   expose `tool_name`, `tool_input`, `tool_use_id`, `tool_response`.
 - **Native TUI**: The TUI enters alternate screen, uses `crossterm` terminal
@@ -62,23 +63,30 @@ Full scope: `research/PRODUCT_SCOPE.md`.
 ## 4. Recommendation for next phase
 
 - Do not implement the full Ultra Code workflow or Rust rewrite yet.
-- Run the **native-integration trial** in Python first
-(`research/NATIVE_INTEGRATION_TRIAL.md`):
-  - `goal-devin start` launches `devin` with the user's terminal attached.
-  - A sidecar observes at least one hook event.
+- Run the **native-integration trial** (`research/NATIVE_INTEGRATION_TRIAL.md`):
+  - The provisional command is `goal-devin dev`.
+  - A supervisor spawns `devin` attached directly to the user's terminal, with a
+    separate read-only sidecar.
   - A temporary custom subagent profile is created and cleaned up.
   - Existing commands remain unchanged.
-- Defer the final Python-vs-Rust language decision until the trial proves the
-integration contract.
+- Split implementation into R1A (Python candidate), R1B (Rust candidate), and
+  R1C (differential evaluation and language decision).
+- Defer the final language decision until both candidates are measured against
+  the same contract.
 
 ## 5. Remaining gaps
 
+- Session-identity concurrency race: `devin list --format json` newest-first
+  behavior is observed but not proven safe under concurrent session creation,
+  list delays, timestamp collisions, or across all Devin versions.
 - Rate-limit error shape and retry behavior: not triggered.
 - Exact `read_subagent` tool schema and background subagent parent notification.
 - Effective subagent model visibility (CLI does not expose it).
 - Full interactive TUI features such as model picker and subagent indicator
   (only basic operation observed).
 - Long-term session behavior (compaction, large context, multi-turn TUI).
+- Config-precedence behavior when `--config`, project config, user config, and
+  `AGENT.md` frontmatter interact.
 
 See `research/GAPS.md` for the full gap list.
 

@@ -16,7 +16,8 @@ gaps are acknowledged and should be addressed as work proceeds.
 - **Custom subagent profile**: `.devin/agents/reviewer/AGENT.md` with `model:`
   frontmatter was loaded and used.
 - **Session identity**: `devin list --format json` shape and newest-first
-  ordering confirmed.
+  ordering observed in a controlled single-session test. Full concurrency safety
+  remains unproven.
 
 ## Still open
 
@@ -68,6 +69,35 @@ fallbacks.
 undocumented.
 
 **Location**: `research/LIVE_NATIVE_TUI.md`.
+
+### Session-identity concurrency race
+
+**What we could not do**: Prove that `devin list --format json` newest-first
+ordering safely identifies the just-created session under concurrency.
+
+**Why**: Only isolated, sequential sessions were tested; no controlled concurrent
+starts, list delays, or timestamp-collision tests were performed.
+
+**Impact**: Goal Devin's `latest_session_id()` heuristic may pick the wrong
+session if two sessions start in the same cwd, if list visibility lags, or if
+another process creates a newer session before Goal Devin lists.
+
+**Location**: `research/DEVIN_SESSION_IDENTITY.md`,
+`research/LIVE_PRINT_SESSION.md`, `research/LIVE_SESSION_RESUME.md`.
+
+### Config precedence with generated `--config`
+
+**What we could not do**: Determine how `devin --config <generated>` interacts
+with project `.devin/config.json`, user `~/.config/devin/config.json`, and
+`AGENT.md` frontmatter.
+
+**Why**: Hook and profile loading were tested in isolated `HOME` setups; merged
+config behavior was not empirically explored.
+
+**Impact**: A Goal Devin-generated config might override user hooks or fail to
+activate the Goal Devin observation hook depending on Devin's precedence rules.
+
+**Location**: `research/NATIVE_INTEGRATION_TRIAL.md`.
 
 ### Long-session behavior
 

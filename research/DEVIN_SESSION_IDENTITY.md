@@ -48,10 +48,29 @@ def latest_session_id(cwd, retries=3, delay=1.0):
 
 ### Properties
 
-- Selects **newest matching session by list order**.
+- Selects the **first matching session in `devin list --format json` output**.
+- In the tested environment the first matching session is also the newest one.
 - Requires `working_directory` to canonicalize to the loop `cwd`.
 - **No fallback** to `sessions[0]`.
 - Retries up to 3 times to handle list-lag after `devin -p`.
+
+### Known race
+
+The evidence supports:
+
+- `devin list --format json` returns newest-first in the tested environment.
+- A newly created isolated session appeared as the newest entry.
+- Explicit resume by known session ID is stable.
+
+The evidence does **not** yet prove:
+
+- Safety when two sessions start concurrently in one cwd.
+- Safety when list visibility is delayed.
+- Safety when timestamps collide.
+- Safety when another process creates a newer session before Goal Devin lists.
+- Safety across all Devin versions.
+
+Classify this as a known race to harden later.
 
 ## Empirical test with fake `devin`
 
@@ -60,7 +79,7 @@ def latest_session_id(cwd, retries=3, delay=1.0):
 3. `latest_session_id(cwd=...canary/.goal-wt/goal-xxx)` returns the ID.
 4. `goal-devin resume <id>` then runs `devin -r <id> -p ...` in the same worktree.
 
-This matches the intended behavior.
+This matches the intended behavior in the controlled, single-session test.
 
 ## Sharp edge: `devin list` scope
 
@@ -80,4 +99,9 @@ This matches the intended behavior.
 
 ## Recommendation
 
-Keep `devin list --format json` as the public seam, but consider augmenting with `--all` or calling from the same cwd as the `devin -p` invocation to minimize scope mismatch. A future Rust rewrite should **not** parse `sessions.db` directly because it is a private implementation detail.
+Keep `devin list --format json` as the public seam, but treat `latest_session_id()`
+as a heuristic with a known concurrency race. Prefer explicit session IDs when
+available. Consider augmenting list resolution with `--all` or calling from the
+same cwd as the `devin -p` invocation to minimize scope mismatch. A future rewrite
+should **not** parse `sessions.db` directly because it is a private implementation
+detail.

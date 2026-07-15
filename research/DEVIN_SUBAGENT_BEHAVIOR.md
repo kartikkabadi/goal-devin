@@ -117,6 +117,7 @@ Independent `devin -p` sessions are **not** the only available architecture; the
 
 ## Implications for Goal Devin
 
-- Use native `subagent_explore` for read-only research, `subagent_general` for write-capable subtasks, and custom profiles only when the user explicitly supplies one.
+- Use native `subagent_explore` for read-only research, `subagent_general` for write-capable subtasks, and custom profiles when Goal Devin needs explicit, visible session policy.
+- Any Goal Devin-generated custom profile must be session-scoped, clearly owned (e.g. `goal-devin-worker-<nonce>`), narrowly permissioned, and safely cleaned up after exit.
 - Do not build an alternate fan-out mechanism using independent `devin -p` sessions as the default; reserve that for Goal Devin-owned verifiers or watchers.
 - Treat `is_background` as the devin-determined foreground/background flag; Goal Devin should not force background mode for subagents because background subagents cannot prompt for new permissions.

@@ -110,13 +110,13 @@ print("ok")
 
 Result: `ok` (exit 0).
 
-## `devin list --format json` safety with multiple sessions
+## `devin list --format json` behavior with multiple sessions
 
 The canary2 directory had only the `level-bathroom` session during the resume
 test. A separate check in `canary/` showed that `devin list --format json`
 returns all sessions for the current directory sorted newest-first. Goal Devin's
 `latest_session_id()` picks the first element, which is the newest matching
-session. This is safe when a new session is created and immediately listed.
+session *in the observed single-session, immediate-list case*.
 
 ## Classification of facts
 
@@ -132,5 +132,5 @@ session. This is safe when a new session is created and immediately listed.
 
 - `devin -r <id> -p` is the correct continuation command for a prior print-mode session.
 - Session IDs are stable and resumable.
-- `devin list --format json` newest-first ordering is reliable for picking the just-created session.
+- `devin list --format json` newest-first ordering is **supported by observation but not proven safe under concurrency**. See `DEVIN_SESSION_IDENTITY.md` for the known race.
 - Always supply the same model on resume to avoid silent model switches.
