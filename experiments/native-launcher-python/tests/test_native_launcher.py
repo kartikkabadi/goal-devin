@@ -107,7 +107,12 @@ def contract_pass(tmp_path):
         env={**os.environ, "GOAL_DEVIN_FAKE_EXIT_CODE": "0", "GOAL_DEVIN_FAKE_SLEEP": "0.1"},
     )
     assert result.returncode == 0, result.stderr
-    run_dirs = [p for p in runtime_root.iterdir() if p.is_dir() and p.name != "canary"]
+    hex_chars = set("0123456789abcdef")
+    run_dirs = [
+        p
+        for p in runtime_root.iterdir()
+        if p.is_dir() and len(p.name) == 32 and all(c in hex_chars for c in p.name.lower())
+    ]
     assert run_dirs, f"No run directory found in {runtime_root}"
     return run_dirs[0]
 
@@ -243,7 +248,12 @@ def test_process_overlap():
     rc, errors, runtime_root = _run_contract(process_overlap=True, keep=True)
     try:
         assert rc == 0, "\n".join(errors)
-        run_dirs = [p for p in runtime_root.iterdir() if p.is_dir() and p.name != "canary"]
+        hex_chars = set("0123456789abcdef")
+        run_dirs = [
+            p
+            for p in runtime_root.iterdir()
+            if p.is_dir() and len(p.name) == 32 and all(c in hex_chars for c in p.name.lower())
+        ]
         assert run_dirs
         run_dir = run_dirs[0]
         lifecycle = (run_dir / "lifecycle.log").read_text(encoding="utf-8")
