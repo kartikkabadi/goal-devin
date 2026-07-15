@@ -340,32 +340,35 @@ def _main() -> int:
     _write_pid(runtime_dir)
     _lifecycle_log("child_start")
 
-    # Pause for the runner to observe process overlap, then continue.
-    _barrier_wait(runtime_dir)
+    no_poll = os.environ.get("GOAL_DEVIN_FAKE_NO_POLL") in ("1", "true", "yes")
+    if not no_poll:
+        # Pause for the runner to observe process overlap, then continue.
+        _barrier_wait(runtime_dir)
 
     hook_rc = _invoke_hook(hook_command, profile_id)
     if hook_rc != 0:
         raise RuntimeError(f"Observation hook exited with code {hook_rc}")
 
-    sleep = float(os.environ.get("GOAL_DEVIN_FAKE_SLEEP", DEFAULT_SLEEP))
-    time.sleep(sleep)
-
     sidecar_total_events = 0
-    if runtime_dir is not None:
-        summary_path = runtime_dir / "summary.json"
-        deadline = time.monotonic() + 5
-        while time.monotonic() < deadline:
-            if summary_path.exists():
-                try:
-                    total = json.loads(summary_path.read_text(encoding="utf-8")).get(
-                        "total_events", 0
-                    )
-                    if total >= 1:
-                        sidecar_total_events = total
-                        break
-                except (json.JSONDecodeError, OSError):
-                    pass
-            time.sleep(0.05)
+    if not no_poll:
+        sleep = float(os.environ.get("GOAL_DEVIN_FAKE_SLEEP", DEFAULT_SLEEP))
+        time.sleep(sleep)
+
+        if runtime_dir is not None:
+            summary_path = runtime_dir / "summary.json"
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline:
+                if summary_path.exists():
+                    try:
+                        total = json.loads(summary_path.read_text(encoding="utf-8")).get(
+                            "total_events", 0
+                        )
+                        if total >= 1:
+                            sidecar_total_events = total
+                            break
+                    except (json.JSONDecodeError, OSError):
+                        pass
+                time.sleep(0.05)
 
     exit_code = int(os.environ.get("GOAL_DEVIN_FAKE_EXIT_CODE", DEFAULT_EXIT_CODE))
 

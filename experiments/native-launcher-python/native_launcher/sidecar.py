@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Read-only sidecar that observes atomically renamed event files."""
+"""Read-only sidecar that observes atomically renamed event files.
+
+The sidecar enforces the runtime limits defined in ``limits.json`` so the
+spool directory and in-memory summary stay bounded.
+"""
 
 import datetime
 import json
@@ -9,6 +13,7 @@ import sys
 import time
 from pathlib import Path
 
+from .limits import Limits, load_limits
 from .schema import validate_file
 from .utils import atomic_write
 
@@ -26,15 +31,26 @@ def _lifecycle_log(path: Path | None, label: str) -> None:
         os.fsync(fh.fileno())
 
 
+def _validate_event_json_size(data: bytes, limits: Limits) -> bool:
+    if len(data) > limits.max_event_json_bytes:
+        print("sidecar: event file exceeds max size; dropping", file=sys.stderr, flush=True)
+        return False
+    return True
+
+
 class Sidecar:
     def __init__(self, runtime_dir: Path) -> None:
         self.runtime_dir = Path(runtime_dir)
         self.events_dir = self.runtime_dir / "events"
         self.summary_path = self.runtime_dir / "summary.json"
         self.schema_path = self.runtime_dir / "event.schema.json"
+        limits_path = self.runtime_dir / "limits.json"
+        self.limits = load_limits(limits_path)
         lifecycle_path = os.environ.get("GOAL_DEVIN_LIFECYCLE_LOG")
         self.lifecycle_path = Path(lifecycle_path) if lifecycle_path else None
         self.consumed: set[str] = set()
+        self.consumed_order: list[str] = []
+        self.total_events: int = 0
         self.tools: dict[str, int] = {}
         self.profiles: dict[str, int] = {}
         self.last_event: dict | None = None
@@ -54,17 +70,64 @@ class Sidecar:
             return False
         return True
 
+    def _check_field_lengths(self, event: dict) -> bool:
+        limits = self.limits
+        for key in ("event", "tool_name", "profile", "observed_at"):
+            value = event.get(key)
+            if isinstance(value, str) and len(value) > limits.max_event_value_length:
+                print(
+                    f"sidecar: event {key} exceeds max length; dropping",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                return False
+        if (
+            isinstance(event.get("tool_name"), str)
+            and len(event["tool_name"]) > limits.max_tool_name_length
+        ):
+            return False
+        if (
+            isinstance(event.get("profile"), str)
+            and len(event["profile"]) > limits.max_profile_length
+        ):
+            return False
+        return True
+
     def _update_summary(self) -> None:
+        limits = self.limits
+        recent_ids = self.consumed_order[-limits.max_recent_event_ids :]
         summary = {
             "schema_version": 1,
             "run_id": self.runtime_dir.name,
-            "total_events": len(self.consumed),
-            "consumed_event_ids": sorted(self.consumed),
+            "total_events": self.total_events,
+            "consumed_event_ids": recent_ids,
             "tools": self.tools,
             "profiles": self.profiles,
             "last_event": self.last_event,
         }
-        atomic_write(self.summary_path, json.dumps(summary, indent=2))
+        text = json.dumps(summary, indent=2)
+        # Final safety guard: if the summary still exceeds the bound, drop the
+        # recent id list and try once more.  This should not happen with the
+        # earlier caps, but it keeps the sidecar fail-open.
+        if len(text.encode("utf-8")) > limits.max_summary_size_bytes:
+            summary["consumed_event_ids"] = []
+            text = json.dumps(summary, indent=2)
+        atomic_write(self.summary_path, text)
+
+    def _add_tool(self, tool: str | None) -> None:
+        if not isinstance(tool, str):
+            return
+        if tool not in self.tools and len(self.tools) >= self.limits.max_distinct_tools:
+            # Already at the distinct-tool limit; drop new tools fail-open.
+            return
+        self.tools[tool] = self.tools.get(tool, 0) + 1
+
+    def _add_profile(self, profile: str | None) -> None:
+        if not isinstance(profile, str):
+            return
+        if profile not in self.profiles and len(self.profiles) >= self.limits.max_distinct_profiles:
+            return
+        self.profiles[profile] = self.profiles.get(profile, 0) + 1
 
     def _process_file(self, path: Path) -> None:
         if path.suffix != ".json":
@@ -73,19 +136,26 @@ class Sidecar:
         if event_id in self.consumed:
             return
         try:
-            data = path.read_text(encoding="utf-8")
-            event = json.loads(data)
-        except (json.JSONDecodeError, OSError):
+            data = path.read_bytes()
+            if not _validate_event_json_size(data, self.limits):
+                self.consumed.add(event_id)
+                return
+            event = json.loads(data.decode("utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return
+        if not self._check_field_lengths(event):
+            self.consumed.add(event_id)
             return
         if not self._validate_event(event):
+            self.consumed.add(event_id)
             return
         self.consumed.add(event_id)
+        self.consumed_order.append(event_id)
+        self.total_events += 1
         tool = event.get("tool_name")
-        if tool:
-            self.tools[tool] = self.tools.get(tool, 0) + 1
         profile = event.get("profile")
-        if profile:
-            self.profiles[profile] = self.profiles.get(profile, 0) + 1
+        self._add_tool(tool)
+        self._add_profile(profile)
         self.last_event = {
             "tool_name": tool,
             "profile": profile,
@@ -95,6 +165,43 @@ class Sidecar:
         }
         self._update_summary()
 
+    def _trim_spool(self) -> None:
+        """Remove oldest consumed event files to keep count and size bounded."""
+        limits = self.limits
+        try:
+            entries = [
+                (p, p.stat().st_size)
+                for p in self.events_dir.iterdir()
+                if p.suffix == ".json" and p.is_file()
+            ]
+        except OSError:
+            return
+        if not entries:
+            return
+        entries.sort(key=lambda x: x[0].stat().st_mtime)
+        total = sum(size for _, size in entries)
+        while (
+            len(entries) > limits.max_retained_event_files or total > limits.max_total_spool_bytes
+        ):
+            removed = False
+            for i, (p, size) in enumerate(entries):
+                if p.stem in self.consumed and p.exists():
+                    try:
+                        p.unlink()
+                        self.consumed.discard(p.stem)
+                        # Also discard from the ordered recent list, but keep
+                        # total_events as an accurate observed count.
+                        if p.stem in self.consumed_order:
+                            self.consumed_order.remove(p.stem)
+                        total -= size
+                        entries.pop(i)
+                        removed = True
+                        break
+                    except OSError:
+                        pass
+            if not removed:
+                break
+
     def _drain(self) -> None:
         try:
             for name in os.listdir(self.events_dir):
@@ -103,6 +210,7 @@ class Sidecar:
                     self._process_file(path)
         except OSError:
             pass
+        self._trim_spool()
 
     def _write_pid(self) -> None:
         pid_path = self.runtime_dir / "sidecar.pid"

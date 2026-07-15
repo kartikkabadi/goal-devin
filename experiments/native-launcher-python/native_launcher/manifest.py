@@ -24,15 +24,16 @@ def make_manifest(
 ) -> Path:
     """Write the run manifest into *runtime_dir* and return its path.
 
-    The manifest declares every path the candidate owns or creates, separated into
-    explicit ``owned_paths`` and directory ``owned_roots`` so the shared runner can
-    verify cleanup targets without requiring a manifest rewrite for every event file.
+    The manifest declares every path exclusively owned by this run.  Only
+    directories that the candidate actually creates are listed in
+    ``owned_roots``; pre-existing user/project directories (``.devin``,
+    ``.devin/agents``) are never claimed.  ``owned_paths`` lists concrete
+    files.  The temporary project hook is only listed if the candidate created
+    it, not if it was borrowed from an existing fixture.
     """
     manifest_path = runtime_dir / "manifest.json"
     hooks_file = canary / ".devin" / "hooks.v1.json"
     profile_dir = profile_path.parent
-    agents_dir = profile_dir.parent
-    devin_dir = agents_dir.parent
 
     owned_paths: list[str] = [
         str(manifest_path.resolve()),
@@ -43,6 +44,7 @@ def make_manifest(
         str((runtime_dir / "child.pid").resolve()),
         str((runtime_dir / "sidecar-ready").resolve()),
         str((runtime_dir / "event.schema.json").resolve()),
+        str((runtime_dir / "limits.json").resolve()),
         str(summary_path.resolve()),
         str((runtime_dir / "fake-devin.record.json").resolve()),
         str(profile_path.resolve()),
@@ -54,10 +56,7 @@ def make_manifest(
         str(runtime_dir.resolve()),
         str(events_dir.resolve()),
         str(profile_dir.resolve()),
-        str(agents_dir.resolve()),
     ]
-    if hook_owned:
-        owned_roots.append(str(devin_dir.resolve()))
 
     manifest = {
         "schema_version": 1,
@@ -76,7 +75,6 @@ def make_manifest(
         "goal_devin_generated": True,
         "owned_paths": owned_paths,
         "owned_roots": owned_roots,
-        "owned_prefixes": [],
     }
     runtime_dir.mkdir(parents=True, exist_ok=True)
     atomic_write(manifest_path, json.dumps(manifest, indent=2))

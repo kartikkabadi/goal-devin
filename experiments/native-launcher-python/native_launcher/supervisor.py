@@ -30,14 +30,10 @@ def _validate_permission_mode(mode: str) -> None:
         raise ValueError("permission-mode must be a one-line identifier")
 
 
-def _validate_existing_hooks(hooks_file: Path) -> dict[str, Any]:
-    """Parse and validate an existing hooks.v1.json file before any mutation."""
-    try:
-        config = json.loads(hooks_file.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
-        raise ValueError(f"Existing hooks file is not valid JSON: {hooks_file}: {exc}") from exc
+def _validate_existing_hooks_config(config: Any) -> None:
+    """Validate the parsed contents of a hooks.v1.json file."""
     if not isinstance(config, dict):
-        raise ValueError(f"Existing hooks file must be a JSON object: {hooks_file}")
+        raise ValueError("Existing hooks file must be a JSON object")
     for key, entries in config.items():
         if not isinstance(entries, list):
             raise ValueError(
@@ -61,13 +57,35 @@ def _validate_existing_hooks(hooks_file: Path) -> dict[str, Any]:
                     raise ValueError(
                         f"Existing hooks event {key}[{i}].hooks[{j}] must be an object"
                     )
+
+
+def _validate_existing_hooks_data(raw: bytes, label: str = "existing hooks") -> dict[str, Any]:
+    """Parse and validate *raw* bytes before any mutation."""
+    try:
+        config = json.loads(raw.decode("utf-8"))
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        raise ValueError(f"{label} is not valid JSON: {exc}") from exc
+    _validate_existing_hooks_config(config)
     return config
+
+
+def _validate_existing_hooks_file(hooks_file: Path) -> dict[str, Any]:
+    """Parse and validate an existing hooks.v1.json file before any mutation."""
+    return _validate_existing_hooks_data(hooks_file.read_bytes(), label=str(hooks_file))
 
 
 def _lifecycle_log(path: Path | None, label: str) -> None:
     if path is None:
         return
     path.parent.mkdir(parents=True, exist_ok=True)
+    # Regression guard: the parent directory must already be private before any
+    # lifecycle data is written.  This fails the run if the directory is created
+    # with the process umask and only later chmodded.
+    parent_mode = stat.S_IMODE(path.parent.stat().st_mode)
+    if parent_mode != 0o700:
+        raise RuntimeError(
+            f"Lifecycle log parent directory {path.parent} mode is {oct(parent_mode)}, expected 0o700"
+        )
     now = datetime.datetime.now(datetime.timezone.utc).isoformat()
     with open(path, "a", encoding="utf-8") as fh:
         fh.write(f"{label} {now}\n")
@@ -132,6 +150,7 @@ class Supervisor:
         self.devin_returncode: int | None = None
         self.original_hooks_bytes: bytes | None = None
         self.original_hooks_mode: int | None = None
+        self.hook_owned: bool = False
         self.lifecycle_path: Path | None = None
 
     def _env(self) -> dict[str, str]:
@@ -153,13 +172,19 @@ class Supervisor:
         path.write_text(str(os.getpid()), encoding="utf-8")
         os.chmod(path, 0o600)
 
-    def _copy_event_schema(self) -> None:
-        src = self.contract_dir / "expected" / "event.schema.json"
-        if not src.exists():
-            raise FileNotFoundError(f"Event schema missing in contract dir: {src}")
-        dst = self.runtime_dir / "event.schema.json"
-        shutil.copyfile(src, dst)
-        os.chmod(dst, 0o600)
+    def _copy_runtime_files(self) -> None:
+        event_schema_src = self.contract_dir / "expected" / "event.schema.json"
+        if not event_schema_src.exists():
+            raise FileNotFoundError(f"Event schema missing in contract dir: {event_schema_src}")
+        event_schema_dst = self.runtime_dir / "event.schema.json"
+        shutil.copyfile(event_schema_src, event_schema_dst)
+        os.chmod(event_schema_dst, 0o600)
+
+        limits_src = self.contract_dir / "limits.json"
+        if limits_src.exists():
+            limits_dst = self.runtime_dir / "limits.json"
+            shutil.copyfile(limits_src, limits_dst)
+            os.chmod(limits_dst, 0o600)
 
     def _install_hook_script(self) -> list[str]:
         hook_src = Path(__file__).resolve().parent / "hook.py"
@@ -171,20 +196,34 @@ class Supervisor:
 
     def _install_canary_hook(self, hook_command: list[str]) -> None:
         devin_dir = self.canary / ".devin"
+        hooks_file = devin_dir / "hooks.v1.json"
         if has_symlink_component(self.canary, devin_dir):
             raise ValueError("canary .devin path contains a symlink")
-        devin_dir.mkdir(parents=True, exist_ok=True)
-        os.chmod(devin_dir, 0o700)
-        hooks_file = devin_dir / "hooks.v1.json"
         if has_symlink_component(self.canary, hooks_file):
             raise ValueError("canary hooks.v1.json path contains a symlink")
 
-        if hooks_file.exists():
+        # Snapshot existence before any mutation.  The temporary project hook is
+        # only marked as owned when it did not exist before this run.
+        hook_file_existed = hooks_file.exists()
+        if hook_file_existed:
             self.original_hooks_bytes = hooks_file.read_bytes()
             self.original_hooks_mode = stat.S_IMODE(hooks_file.stat().st_mode)
-            existing_config = json.loads(self.original_hooks_bytes.decode("utf-8"))
+            existing_config = _validate_existing_hooks_data(
+                self.original_hooks_bytes, label=str(hooks_file)
+            )
         else:
+            self.original_hooks_bytes = None
+            self.original_hooks_mode = None
             existing_config = {}
+
+        self.hook_owned = not hook_file_existed
+
+        # Only create/chmod .devin if it does not already exist; a
+        # pre-existing .devin directory belongs to the user/project.
+        devin_dir_created = not devin_dir.exists()
+        devin_dir.mkdir(parents=True, exist_ok=True)
+        if devin_dir_created:
+            os.chmod(devin_dir, 0o700)
 
         command_str = " ".join(shlex.quote(str(part)) for part in hook_command)
         goal_devin_entry = {
@@ -235,21 +274,34 @@ class Supervisor:
         if self.existing_hooks:
             if not self.existing_hooks.exists():
                 raise FileNotFoundError(f"existing-hooks fixture not found: {self.existing_hooks}")
+            # Validate the source bytes before any canary mutation.
+            source_bytes = self.existing_hooks.read_bytes()
+            _validate_existing_hooks_data(source_bytes, label=str(self.existing_hooks))
+
             devin_dir = self.canary / ".devin"
             if has_symlink_component(self.canary, devin_dir):
                 raise ValueError("canary .devin path contains a symlink")
-            devin_dir.mkdir(parents=True, exist_ok=True)
-            os.chmod(devin_dir, 0o700)
             dst = devin_dir / "hooks.v1.json"
             if has_symlink_component(self.canary, dst):
                 raise ValueError("canary hooks.v1.json path contains a symlink")
+
+            devin_dir_created = not devin_dir.exists()
+            devin_dir.mkdir(parents=True, exist_ok=True)
+            if devin_dir_created:
+                os.chmod(devin_dir, 0o700)
             shutil.copyfile(self.existing_hooks, dst)
             os.chmod(dst, stat.S_IMODE(self.existing_hooks.stat().st_mode))
-            _validate_existing_hooks(dst)
         else:
+            # Pre-existing canary hooks must be validated before any profile or
+            # sidecar work is started, and their pre-mutation state captured.
             hooks_file = self.canary / ".devin" / "hooks.v1.json"
             if hooks_file.exists():
-                _validate_existing_hooks(hooks_file)
+                if has_symlink_component(self.canary, hooks_file):
+                    raise ValueError("canary hooks.v1.json path contains a symlink")
+                self.original_hooks_bytes = hooks_file.read_bytes()
+                self.original_hooks_mode = stat.S_IMODE(hooks_file.stat().st_mode)
+                _validate_existing_hooks_data(self.original_hooks_bytes, label=str(hooks_file))
+                self.hook_owned = False
 
     def _start_sidecar(self) -> None:
         candidate_dir = _candidate_dir()
@@ -324,15 +376,18 @@ class Supervisor:
 
     def run(self) -> int:
         """Execute the happy-path lifecycle and return the child's exit code."""
-        self.lifecycle_path = self.runtime_dir / "lifecycle.log"
-        _lifecycle_log(self.lifecycle_path, "supervisor_start")
-
+        # Create/chmod the runtime directory to 0700 before any file or
+        # subdirectory is written, including the lifecycle log.
         mkdir_private(self.runtime_dir, mode=0o700)
+
         self.events_dir = self.runtime_dir / "events"
         self.events_dir.mkdir(parents=True, exist_ok=True)
         os.chmod(self.events_dir, 0o700)
         self.summary_path = self.runtime_dir / "summary.json"
         self._write_pid(self.runtime_dir / "supervisor.pid")
+
+        self.lifecycle_path = self.runtime_dir / "lifecycle.log"
+        _lifecycle_log(self.lifecycle_path, "supervisor_start")
 
         self._create_canary()
         if self.canary is None:
@@ -353,7 +408,7 @@ class Supervisor:
             canary=self.canary,
             hook_command=hook_command,
             hook_path=self.hook_path,
-            hook_owned=self.existing_hooks is None,
+            hook_owned=self.hook_owned,
             profile_id=self.profile_id,
             profile_path=self.profile_path,
             events_dir=self.events_dir,
@@ -361,7 +416,7 @@ class Supervisor:
             lifecycle_log_path=self.lifecycle_path,
         )
 
-        self._copy_event_schema()
+        self._copy_runtime_files()
         self._start_sidecar()
 
         try:

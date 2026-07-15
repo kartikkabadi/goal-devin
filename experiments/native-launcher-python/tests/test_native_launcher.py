@@ -9,6 +9,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 import pytest
@@ -45,9 +46,11 @@ def _run_contract(
     existing_hooks: bool | str | Path = False,
     tty: bool = False,
     process_overlap: bool = False,
+    no_poll: bool = False,
     keep: bool = False,
     extra_env: dict | None = None,
     contract_dir: Path | None = None,
+    timeout: float | None = None,
 ) -> tuple[int, list[str], Path]:
     """Run the shared contract and return (rc, error_lines, runtime_root)."""
     base_dir = Path(tempfile.mkdtemp(prefix="goal-devin-r1a1-test-"))
@@ -83,22 +86,30 @@ def _run_contract(
         cmd.append("--tty")
     if process_overlap:
         cmd.append("--process-overlap")
+    if no_poll:
+        cmd.append("--no-poll")
     if keep:
         cmd.append("--keep-artifacts")
+    if timeout is not None:
+        cmd.extend(["--timeout", str(timeout)])
     env = os.environ.copy()
     env["GOAL_DEVIN_FAKE_EXIT_CODE"] = "0"
     env["GOAL_DEVIN_FAKE_SLEEP"] = "0.1"
     if extra_env:
         env.update(extra_env)
-    result = subprocess.run(
-        cmd,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        env=env,
-    )
-    errors = [line.strip() for line in result.stderr.splitlines() if line.startswith("  - ")]
-    return result.returncode, errors, runtime_root
+    try:
+        result = subprocess.run(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            env=env,
+        )
+        errors = [line.strip() for line in result.stderr.splitlines() if line.startswith("  - ")]
+        return result.returncode, errors, runtime_root
+    finally:
+        if not keep:
+            shutil.rmtree(base_dir, ignore_errors=True)
 
 
 @pytest.fixture
@@ -174,7 +185,11 @@ def test_event_schema_rejection_for_invalid_fixture():
 
 
 def test_schema_conformance_corpus():
-    """Run the shared schema conformance corpus through both validators."""
+    """Run the shared schema conformance corpus through both validators.
+
+    Compare acceptance/rejection booleans only; exact error wording and order are
+    intentionally not compared so the corpus is language-neutral.
+    """
     from native_launcher.schema import (
         validate as runtime_validate,
         validate_file as runtime_validate_file,
@@ -194,16 +209,17 @@ def test_schema_conformance_corpus():
         for value in case["valid"]:
             shared = schema_validator.validate(value, schema)
             runtime = runtime_validate(value, schema)
-            assert shared == runtime, (
-                f"{case['name']} valid mismatch for {value!r}: {shared} vs {runtime}"
+            assert not shared, (
+                f"{case['name']} valid: shared validator rejected {value!r}: {shared}"
+            )
+            assert not runtime, (
+                f"{case['name']} valid: runtime validator rejected {value!r}: {runtime}"
             )
         for value in case["invalid"]:
             shared = schema_validator.validate(value, schema)
             runtime = runtime_validate(value, schema)
-            assert shared == runtime, (
-                f"{case['name']} invalid mismatch for {value!r}: {shared} vs {runtime}"
-            )
-            assert shared, f"{case['name']} should reject {value!r}"
+            assert shared, f"{case['name']} invalid: shared validator accepted {value!r}"
+            assert runtime, f"{case['name']} invalid: runtime validator accepted {value!r}"
 
 
 def test_sidecar_event_consumption(contract_pass):
@@ -230,6 +246,9 @@ def test_profile_cleanup(contract_pass):
     assert not profile_dir.exists()
 
 
+MANAGED_BASE_MARKER = "GOAL_DEVIN_CONTRACT_BASE"
+
+
 def test_no_writes_outside_allowed_roots(contract_pass):
     base_dir = contract_pass.parent.parent
     manifest = json.loads((contract_pass / "manifest.json").read_text())
@@ -240,6 +259,8 @@ def test_no_writes_outside_allowed_roots(contract_pass):
             assert path.resolve().is_relative_to(root.resolve())
     for path in base_dir.rglob("*"):
         if path.is_file() or path.is_dir():
+            if path.name == MANAGED_BASE_MARKER and path.parent == base_dir:
+                continue
             assert path.resolve().is_relative_to(runtime_root.resolve())
 
 
@@ -361,6 +382,7 @@ def test_complete_file_modes(contract_pass):
         ("manifest.json", 0o600),
         ("summary.json", 0o600),
         ("event.schema.json", 0o600),
+        ("limits.json", 0o600),
         ("fake-devin.record.json", 0o600),
         ("hook", 0o700),
     ]:
@@ -729,6 +751,265 @@ def test_malformed_existing_hooks_argument_rejected(hooks_content):
     finally:
         tmp_hooks.unlink(missing_ok=True)
         shutil.rmtree(runtime_root.parent, ignore_errors=True)
+
+
+def test_pre_existing_canary_hooks_and_user_agent_preserved():
+    """A canary with a pre-existing hook and a user-owned agent must survive untouched."""
+    fixture = Path(tempfile.mkdtemp(prefix="goal-devin-r1a1-pre-existing-"))
+    canary = fixture / "canary"
+    canary.mkdir(parents=True)
+    devin_dir = canary / ".devin"
+    devin_dir.mkdir()
+    agents_dir = devin_dir / "agents"
+    agents_dir.mkdir()
+    user_dir = agents_dir / "user-agent"
+    user_dir.mkdir()
+    user_agent = user_dir / "AGENT.md"
+    user_agent.write_text("---\nname: user-agent\n---\n", encoding="utf-8")
+    hooks_file = devin_dir / "hooks.v1.json"
+    hooks_file.write_text(
+        json.dumps(
+            {
+                "PreToolUse": [
+                    {
+                        "matcher": "user",
+                        "hooks": [{"type": "command", "command": "/bin/user", "timeout": 1}],
+                    }
+                ]
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    original_hooks_bytes = hooks_file.read_bytes()
+    original_hooks_mode = stat.S_IMODE(hooks_file.stat().st_mode)
+    original_agent_bytes = user_agent.read_bytes()
+
+    try:
+        rc, errors, runtime_root = _run_contract(canary_fixture=canary, keep=True)
+        assert rc == 0, "\n".join(errors)
+        run_dir = _find_run_dir(runtime_root)
+        assert run_dir
+        manifest = json.loads((run_dir / "manifest.json").read_text())
+        canary_out = runtime_root / "canary"
+
+        # Pre-existing files and directories are preserved byte-for-byte.
+        assert (canary_out / ".devin" / "hooks.v1.json").read_bytes() == original_hooks_bytes
+        assert (
+            stat.S_IMODE((canary_out / ".devin" / "hooks.v1.json").stat().st_mode)
+            == original_hooks_mode
+        )
+        assert (
+            canary_out / ".devin" / "agents" / "user-agent" / "AGENT.md"
+        ).read_bytes() == original_agent_bytes
+
+        # Ownership must not claim user/project directories or borrowed files.
+        owned_paths = {Path(p).resolve() for p in manifest["owned_paths"]}
+        owned_roots = {Path(p).resolve() for p in manifest["owned_roots"]}
+        assert (canary_out / ".devin").resolve() not in owned_roots
+        assert (canary_out / ".devin" / "agents").resolve() not in owned_roots
+        assert (canary_out / ".devin" / "hooks.v1.json").resolve() not in owned_paths
+
+        # The generated Goal Devin profile is the only owned subtree under agents.
+        profile_path = Path(manifest["profile_path"]).resolve()
+        assert profile_path in owned_paths
+        profile_dir = profile_path.parent.resolve()
+        assert profile_dir in owned_roots
+        assert profile_dir.is_relative_to((canary_out / ".devin" / "agents").resolve())
+    finally:
+        shutil.rmtree(fixture, ignore_errors=True)
+        if "runtime_root" in locals():
+            shutil.rmtree(runtime_root.parent, ignore_errors=True)
+
+
+def test_runner_timeout_kills_hanging_candidate():
+    """The shared runner must reap a candidate that hangs without a run directory."""
+    start = time.monotonic()
+    rc, errors, _ = _run_contract(
+        candidate=TESTKIT / "fixtures" / "hang-candidate.py",
+        timeout=2,
+    )
+    elapsed = time.monotonic() - start
+    assert rc != 0
+    assert elapsed < 6, f"runner did not fail within the timeout bound ({elapsed:.1f}s)"
+    assert elapsed >= 1.5, "runner should have waited for the timeout"
+
+
+def test_base_dir_sentinel_preserved():
+    """A pre-existing file under --base-dir must survive the run and the runner must not
+    remove the caller-supplied base directory."""
+    base_dir = Path(tempfile.mkdtemp(prefix="goal-devin-r1a1-base-sentinel-"))
+    sentinel = base_dir / "sentinel.txt"
+    sentinel.write_text("do not delete", encoding="utf-8")
+    runtime_root = base_dir / "runtime"
+    runtime_root.mkdir(parents=True, exist_ok=True)
+    cmd = [
+        "python3",
+        str(RUN_CONTRACT),
+        "--candidate",
+        str(CANDIDATE),
+        "--devin-bin",
+        str(FAKE_DEVIN),
+        "--contract-dir",
+        str(TESTKIT),
+        "--canary-fixture",
+        str(CANARY_FIXTURE),
+        "--runtime-root",
+        str(runtime_root),
+        "--base-dir",
+        str(base_dir),
+    ]
+    try:
+        result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        assert result.returncode == 0, result.stderr
+        assert sentinel.read_text(encoding="utf-8") == "do not delete"
+        # The runner-created runtime root is removed; the caller-owned base dir remains.
+        assert not runtime_root.exists()
+    finally:
+        shutil.rmtree(base_dir, ignore_errors=True)
+
+
+def test_no_poll_final_drain():
+    """With --no-poll, fake-devin exits immediately; the sidecar still consumes the event
+    during its final drain after supervisor shutdown."""
+    rc, errors, runtime_root = _run_contract(no_poll=True, keep=True)
+    assert rc == 0, "\n".join(errors)
+    try:
+        run_dir = _find_run_dir(runtime_root)
+        assert run_dir
+        record = json.loads((run_dir / "fake-devin.record.json").read_text())
+        # The fake child did not poll the summary before exiting.
+        assert record.get("sidecar_total_events", -1) == 0
+        summary = json.loads((run_dir / "summary.json").read_text())
+        assert summary.get("total_events", 0) >= 1
+        assert summary["last_event"]["tool_name"] == "run_subagent"
+    finally:
+        shutil.rmtree(runtime_root.parent, ignore_errors=True)
+
+
+def test_lifecycle_log_requires_private_parent(tmp_path):
+    """Lifecycle logging must fail if the parent directory is not 0700."""
+    from native_launcher.supervisor import _lifecycle_log
+
+    public = tmp_path / "public"
+    public.mkdir()
+    os.chmod(public, 0o755)
+    with pytest.raises(RuntimeError, match="0o700"):
+        _lifecycle_log(public / "log", "test")
+
+
+def test_hook_enforces_runtime_limits():
+    """hook.py truncates/limits fields and always exits zero."""
+    hook_script = (
+        REPO_ROOT / "experiments" / "native-launcher-python" / "native_launcher" / "hook.py"
+    )
+    runtime_dir = Path(tempfile.mkdtemp(prefix="goal-devin-hook-limits-"))
+    events_dir = runtime_dir / "events"
+    try:
+        shutil.copyfile(TESTKIT / "limits.json", runtime_dir / "limits.json")
+        payload = {
+            "hook_event_name": "PostToolUse",
+            "tool_name": "run_subagent",
+            "tool_input": {"profile": "goal-devin-worker-abc", "is_background": False},
+            "tool_response": {"success": True, "output": "<redacted>"},
+        }
+        result = subprocess.run(
+            [sys.executable, str(hook_script), str(events_dir)],
+            input=json.dumps(payload),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        assert result.returncode == 0
+        json_files = list(events_dir.glob("*.json"))
+        assert len(json_files) == 1
+        event = json.loads(json_files[0].read_text(encoding="utf-8"))
+        limits = json.loads((TESTKIT / "limits.json").read_text(encoding="utf-8"))
+        assert event["tool_name"] == "run_subagent"
+        assert event["profile"] == "goal-devin-worker-abc"
+        assert len(json.dumps(event).encode("utf-8")) <= limits["max_event_json_bytes"]
+
+        # A huge tool_name is truncated to the limit and the hook still exits zero.
+        oversized = payload.copy()
+        oversized["tool_name"] = "x" * (limits["max_tool_name_length"] + 100)
+        result = subprocess.run(
+            [sys.executable, str(hook_script), str(events_dir)],
+            input=json.dumps(oversized),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        assert result.returncode == 0
+        events = list(events_dir.glob("*.json"))
+        # The first event was consumed by the sidecar in a real run; here we just
+        # check that the second oversized invocation produced a bounded event.
+        assert events
+        last = json.loads(events[-1].read_text(encoding="utf-8"))
+        assert isinstance(last["tool_name"], str)
+        assert len(last["tool_name"]) <= limits["max_tool_name_length"]
+    finally:
+        shutil.rmtree(runtime_dir, ignore_errors=True)
+
+
+def test_sidecar_enforces_runtime_limits():
+    """The sidecar caps distinct tools/profiles and trims old event files."""
+    from native_launcher.sidecar import Sidecar
+
+    runtime_dir = Path(tempfile.mkdtemp(prefix="goal-devin-sidecar-limits-"))
+    events_dir = runtime_dir / "events"
+    events_dir.mkdir(parents=True)
+    shutil.copyfile(TESTKIT / "expected" / "event.schema.json", runtime_dir / "event.schema.json")
+    shutil.copyfile(TESTKIT / "limits.json", runtime_dir / "limits.json")
+
+    def make_event(tool_name: str, profile: str, event_id: str) -> dict:
+        return {
+            "schema_version": 1,
+            "event": "PostToolUse",
+            "tool_name": tool_name,
+            "profile": profile,
+            "is_background": False,
+            "success": True,
+            "observed_at": "2024-01-01T00:00:00+00:00",
+        }
+
+    try:
+        limits = json.loads((TESTKIT / "limits.json").read_text(encoding="utf-8"))
+        sidecar = Sidecar(runtime_dir)
+        sidecar.events_dir = events_dir
+
+        # Create more retained files than the limit.
+        total = limits["max_retained_event_files"] + 25
+        for i in range(total):
+            eid = f"{i:04d}{'a' * 24}"
+            path = events_dir / f"{eid}.json"
+            path.write_text(
+                json.dumps(make_event(f"tool-{i}", f"profile-{i}", eid), indent=2), encoding="utf-8"
+            )
+            # Artificially stagger mtimes so the trim order is deterministic.
+            os.utime(path, (i, i))
+
+        sidecar._drain()
+        json_files = list(events_dir.glob("*.json"))
+        assert len(json_files) <= limits["max_retained_event_files"]
+        assert sidecar.total_events == total
+        assert len(sidecar.tools) == limits["max_distinct_tools"]
+        assert len(sidecar.profiles) == limits["max_distinct_profiles"]
+
+        # Recent IDs in the summary are capped.
+        summary_path = runtime_dir / "summary.json"
+        assert summary_path.exists()
+        summary = json.loads(summary_path.read_text(encoding="utf-8"))
+        assert len(summary["consumed_event_ids"]) <= limits["max_recent_event_ids"]
+        assert summary["total_events"] == total
+
+        # An oversized event file is dropped without affecting Devin.
+        big_path = events_dir / "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz.json"
+        big_path.write_bytes(b"x" * (limits["max_event_json_bytes"] + 1))
+        before = sidecar.total_events
+        sidecar._drain()
+        assert sidecar.total_events == before
+    finally:
+        shutil.rmtree(runtime_dir, ignore_errors=True)
 
 
 def test_production_source_tree_unchanged():

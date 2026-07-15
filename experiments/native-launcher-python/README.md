@@ -14,12 +14,13 @@ experiments/native-launcher-python/goal-devin-dev \
   --devin-bin <path-to-fake-devin> \
   --contract-dir experiments/native-launcher-testkit \
   --runtime-root "$BASE/runtime" \
-  --canary "$BASE/canary"
+  --canary "$BASE/runtime/canary"
 ```
 
-`accept-edits` is the value observed in the v3000.1.27 `fake-devin` fixture; it is
-used here as an example permission mode, not as a claim that it is a current or
-universal Devin enum value.
+`accept-edits` is the value recorded against real Devin v3000.1.27 during earlier
+research; the fake `devin` fixture simply models that selected permission mode. It is
+used here as an example, not as a claim that it is a current or universal Devin enum
+value.
 
 `--base-dir` belongs to the shared runner (`run-contract.py`), not to the
 candidate. The candidate only needs `--runtime-root` and a canary directory
@@ -120,9 +121,9 @@ stdio, and clean up generated artifacts.
 - The outside-write oracle is self-consistent: `--runtime-root` must be inside
   `--base-dir`; a negative-control candidate that writes a sibling file under the
   base is rejected.
-- The manifest declares every generated artifact with `owned_paths`, `owned_roots`,
-  and `owned_prefixes`; the runner rejects any generated file not covered by the
-  manifest and asserts that pre-existing/user-owned paths are never marked owned.
+- The manifest declares every generated artifact with `owned_paths` and
+  `owned_roots`; the runner rejects any generated file not covered by the manifest
+  and asserts that pre-existing/user-owned paths are never marked owned.
 
 ## What is not proven
 

@@ -1,0 +1,12 @@
+{
+  "max_tool_name_length": 128,
+  "max_profile_length": 128,
+  "max_event_value_length": 256,
+  "max_event_json_bytes": 4096,
+  "max_total_spool_bytes": 1048576,
+  "max_retained_event_files": 100,
+  "max_distinct_tools": 50,
+  "max_distinct_profiles": 50,
+  "max_recent_event_ids": 20,
+  "max_summary_size_bytes": 65536
+}

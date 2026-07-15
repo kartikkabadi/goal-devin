@@ -37,6 +37,9 @@ SECRET_PATTERNS = [
 ]
 
 
+MANAGED_BASE_MARKER = "GOAL_DEVIN_CONTRACT_BASE"
+
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run the native launcher happy-path contract.")
     parser.add_argument("--candidate", required=True, help="Path to the candidate executable.")
@@ -48,7 +51,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--contract-dir",
         default=None,
-        help="Path to the shared testkit directory containing expected/*.schema.json.",
+        help="Path to the shared testkit directory containing expected/*.schema.json and limits.json.",
     )
     parser.add_argument(
         "--canary-fixture",
@@ -75,6 +78,17 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--process-overlap",
         action="store_true",
         help="Block the fake child until all three PIDs are observed alive.",
+    )
+    parser.add_argument(
+        "--no-poll",
+        action="store_true",
+        help="Instruct fake-devin to exit immediately after invoking the hook.",
+    )
+    parser.add_argument(
+        "--timeout",
+        type=float,
+        default=30.0,
+        help="Overall runner timeout in seconds (default: 30).",
     )
     parser.add_argument(
         "--keep-artifacts",
@@ -212,6 +226,55 @@ def _prepare_isolated_env(runtime_root: Path, env: dict[str, str]) -> dict[str, 
     return env
 
 
+def _kill_process_tree(proc: subprocess.Popen, run_dir: Path | None) -> None:
+    """Reap the candidate process group and any recorded sidecar/child pids."""
+    try:
+        os.killpg(proc.pid, signal.SIGTERM)
+    except (OSError, ProcessLookupError):
+        pass
+    try:
+        proc.wait(timeout=2)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except (OSError, ProcessLookupError):
+            pass
+        try:
+            proc.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            pass
+
+    if run_dir is not None:
+        for name in ("supervisor.pid", "sidecar.pid", "child.pid"):
+            pid_path = run_dir / name
+            if pid_path.exists():
+                try:
+                    pid = int(pid_path.read_text(encoding="utf-8").strip().split()[0])
+                    os.kill(pid, signal.SIGTERM)
+                    time.sleep(0.1)
+                    os.kill(pid, signal.SIGKILL)
+                except (OSError, ProcessLookupError, ValueError):
+                    pass
+        continue_path = run_dir / "continue"
+        if continue_path.exists():
+            try:
+                continue_path.unlink()
+            except OSError:
+                pass
+
+
+def _find_run_dir_or_cleanup(
+    proc: subprocess.Popen, runtime_root: Path, timeout: float
+) -> Path | None:
+    """Return the run directory if it appears, or None on timeout."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline and proc.poll() is None:
+        run_dir = find_run_dir(runtime_root, timeout=0.5)
+        if run_dir is not None:
+            return run_dir
+    return find_run_dir(runtime_root, timeout=0.0)
+
+
 def run_candidate(
     args: argparse.Namespace, runtime_root: Path, canary: Path
 ) -> tuple[subprocess.Popen, int, Path | None, bytes, bytes]:
@@ -241,6 +304,8 @@ def run_candidate(
     env = os.environ.copy()
     env["GOAL_DEVIN_FAKE_EXIT_CODE"] = "0"
     env["GOAL_DEVIN_FAKE_SLEEP"] = "0.1"
+    if args.no_poll:
+        env["GOAL_DEVIN_FAKE_NO_POLL"] = "1"
     env = _prepare_isolated_env(runtime_root, env)
 
     if args.existing_hooks:
@@ -251,14 +316,21 @@ def run_candidate(
                 env["GOAL_DEVIN_EXPECTED_EXISTING_HOOK_COMMAND"] = expected_cmd
         except (json.JSONDecodeError, ValueError):
             # The candidate is responsible for validating the existing hooks file.
-            # If it is malformed, the runner cannot extract an expected command.
             pass
 
     if args.process_overlap:
         env["GOAL_DEVIN_BARRIER"] = "1"
 
+    timeout = args.timeout
+    stdout = b""
+    stderr = b""
+    run_dir: Path | None = None
+
     if args.tty:
         import pty
+
+        if args.process_overlap:
+            raise RuntimeError("--tty and --process-overlap are not supported together")
 
         master, slave = pty.openpty()
         proc = subprocess.Popen(
@@ -268,18 +340,20 @@ def run_candidate(
             stderr=slave,
             env=env,
             close_fds=True,
+            start_new_session=True,
         )
         os.close(slave)
-        run_dir: Path | None = None
-        if args.process_overlap:
-            raise RuntimeError("--tty and --process-overlap are not supported together")
-        returncode = proc.wait()
+        try:
+            returncode = proc.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            _kill_process_tree(proc, None)
+            returncode = -1
         try:
             os.read(master, 4096)
         except OSError:
             pass
         os.close(master)
-        return proc, returncode, run_dir, b"", b""
+        return proc, returncode, None, stdout, stderr
 
     proc = subprocess.Popen(
         cmd,
@@ -287,38 +361,34 @@ def run_candidate(
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         env=env,
+        start_new_session=True,
     )
 
-    run_dir: Path | None = None
     try:
         if args.process_overlap:
-            run_dir = find_run_dir(runtime_root, timeout=10)
+            run_dir = _find_run_dir_or_cleanup(proc, runtime_root, timeout=10)
             if run_dir is None:
                 stdout, stderr = proc.communicate(timeout=5)
                 raise RuntimeError(
-                    f"No run directory appeared under {runtime_root}: {stderr.decode()}"
+                    f"No run directory appeared under {runtime_root}: {stderr.decode(errors='replace')}"
                 )
             _collect_pids(proc.pid, run_dir)
             continue_path = run_dir / "continue"
             continue_path.write_text("go\n", encoding="utf-8")
             os.chmod(continue_path, 0o600)
 
-        stdout, stderr = proc.communicate()
+        stdout, stderr = proc.communicate(timeout=timeout)
+        returncode = proc.returncode if proc.returncode is not None else -1
+    except subprocess.TimeoutExpired:
+        # Timeouts in normal mode: find the run directory if possible, then reap.
+        if run_dir is None:
+            run_dir = find_run_dir(runtime_root, timeout=2)
+        _kill_process_tree(proc, run_dir)
+        stdout = b""
+        stderr = b""
+        returncode = -1
     except Exception:
-        try:
-            proc.kill()
-            proc.wait(timeout=2)
-        except Exception:
-            pass
-        for name in ("sidecar.pid", "child.pid"):
-            if run_dir is not None:
-                pid_path = run_dir / name
-                if pid_path.exists():
-                    try:
-                        pid = int(pid_path.read_text(encoding="utf-8").strip().split()[0])
-                        os.kill(pid, signal.SIGKILL)
-                    except (OSError, ProcessLookupError, ValueError):
-                        pass
+        _kill_process_tree(proc, run_dir)
         raise
     finally:
         if run_dir is not None:
@@ -326,7 +396,7 @@ def run_candidate(
             if continue_path.exists():
                 continue_path.unlink()
 
-    return proc, proc.returncode, run_dir, stdout, stderr
+    return proc, returncode, run_dir, stdout, stderr
 
 
 def _check_lifecycle(log_path: Path, errors: list[str]) -> None:
@@ -348,21 +418,22 @@ def _check_lifecycle(log_path: Path, errors: list[str]) -> None:
                 errors.append(f"lifecycle ordering violated: {a} after {b}")
 
 
-def _no_outside_writes(base_dir: Path, runtime_root: Path, errors: list[str]) -> None:
+def _no_outside_writes(
+    base_dir: Path,
+    runtime_root: Path,
+    base_dir_initial: set[Path],
+    errors: list[str],
+) -> None:
     runtime_resolved = runtime_root.resolve()
     for path in base_dir.rglob("*"):
-        if path.is_file() or path.is_dir():
-            resolved = path.resolve()
-            if not resolved.is_relative_to(runtime_resolved):
-                errors.append(f"File or directory outside runtime root: {resolved}")
+        if path in base_dir_initial:
+            continue
+        resolved = path.resolve()
+        if not resolved.is_relative_to(runtime_resolved):
+            errors.append(f"File or directory outside runtime root: {resolved}")
 
 
-def _is_owned(
-    path: Path,
-    owned_paths: set[Path],
-    owned_roots: list[Path],
-    owned_prefixes: list[str],
-) -> bool:
+def _is_owned(path: Path, owned_paths: set[Path], owned_roots: list[Path]) -> bool:
     resolved = path.resolve()
     if resolved in owned_paths:
         return True
@@ -372,10 +443,6 @@ def _is_owned(
                 return True
         except ValueError:
             pass
-    s = str(resolved)
-    for prefix in owned_prefixes:
-        if s.startswith(prefix):
-            return True
     return False
 
 
@@ -392,7 +459,6 @@ def _check_ownership(
     paths are never marked as owned."""
     owned_paths = {Path(p).resolve() for p in manifest.get("owned_paths", [])}
     owned_roots = [Path(p).resolve() for p in manifest.get("owned_roots", [])]
-    owned_prefixes = manifest.get("owned_prefixes", [])
 
     pre_existing: set[Path] = set()
     if canary_fixture and canary_fixture.is_dir():
@@ -406,7 +472,7 @@ def _check_ownership(
     if run_dir.is_dir():
         for path in run_dir.rglob("*"):
             if path.is_file():
-                if not _is_owned(path, owned_paths, owned_roots, owned_prefixes):
+                if not _is_owned(path, owned_paths, owned_roots):
                     errors.append(f"Generated runtime file not owned: {path.resolve()}")
 
     devin_dir = canary / ".devin"
@@ -416,19 +482,21 @@ def _check_ownership(
                 resolved = path.resolve()
                 if resolved in pre_existing:
                     continue
-                if not _is_owned(resolved, owned_paths, owned_roots, owned_prefixes):
+                if not _is_owned(resolved, owned_paths, owned_roots):
                     errors.append(f"Generated canary file not owned: {resolved}")
 
     profile_path = Path(manifest["profile_path"]).resolve()
-    if not _is_owned(profile_path, owned_paths, owned_roots, owned_prefixes):
+    if not _is_owned(profile_path, owned_paths, owned_roots):
         errors.append("Generated profile path not declared in manifest")
-    if existing_bytes is None:
-        hooks_path = (canary / ".devin" / "hooks.v1.json").resolve()
+
+    hooks_path = (canary / ".devin" / "hooks.v1.json").resolve()
+    if existing_bytes is None and hooks_path.is_file():
+        # The candidate created the hook file but the manifest does not own it.
         if hooks_path not in owned_paths:
             errors.append("Temporary project hook not declared in manifest owned_paths")
 
     for pre in pre_existing:
-        if _is_owned(pre, owned_paths, owned_roots, owned_prefixes):
+        if _is_owned(pre, owned_paths, owned_roots):
             errors.append(f"Pre-existing/user-owned path marked as owned: {pre}")
 
 
@@ -446,6 +514,7 @@ def _check_file_modes(run_dir: Path, errors: list[str]) -> None:
         ("manifest.json", "manifest.json"),
         ("summary.json", "summary.json"),
         ("event.schema.json", "event.schema.json"),
+        ("limits.json", "limits.json"),
         ("fake-devin.record.json", "fake-devin.record.json"),
     ]
     for name, label in files_600:
@@ -465,25 +534,65 @@ def _check_file_modes(run_dir: Path, errors: list[str]) -> None:
         check_file_mode(event_file, 0o600, f"event file {event_file.name}", errors)
 
 
+def _cleanup(
+    base_dir: Path,
+    runtime_root: Path,
+    keep: bool,
+    base_dir_removable: bool,
+    runtime_root_removable: bool,
+) -> None:
+    if keep:
+        return
+    if base_dir_removable:
+        shutil.rmtree(base_dir, ignore_errors=True)
+    elif runtime_root_removable and runtime_root.resolve() != base_dir.resolve():
+        shutil.rmtree(runtime_root, ignore_errors=True)
+
+
+def _snapshot_base_dir(base_dir: Path) -> set[Path]:
+    return {p.resolve() for p in base_dir.rglob("*")} | {base_dir.resolve()}
+
+
 def run_contract(args: argparse.Namespace) -> list[str]:
     errors: list[str] = []
 
-    if args.runtime_root:
+    runtime_root_provided = args.runtime_root is not None
+    if runtime_root_provided:
         runtime_root = Path(args.runtime_root).resolve()
-        runtime_root.mkdir(parents=True, exist_ok=True)
     else:
         runtime_root = Path(tempfile.mkdtemp(prefix="goal-devin-contract-"))
+
+    runtime_root_existed = runtime_root.exists()
+    runtime_root.mkdir(parents=True, exist_ok=True)
+    runtime_root_initial = set(runtime_root.iterdir())
+    if runtime_root_existed and runtime_root_initial and runtime_root_provided:
+        errors.append(f"--runtime-root already contains files: {runtime_root_initial}")
+        return errors
+    runtime_root_removable = (
+        not runtime_root_provided or not runtime_root_existed or not runtime_root_initial
+    )
 
     if args.base_dir:
         base_dir = Path(args.base_dir).resolve()
         base_dir.mkdir(parents=True, exist_ok=True)
-        if not runtime_root.resolve().is_relative_to(base_dir):
-            errors.append("--runtime-root must be inside --base-dir")
-            if not args.keep_artifacts:
-                shutil.rmtree(base_dir, ignore_errors=True)
-            return errors
+        base_dir_initial = set(base_dir.iterdir())
+        if base_dir_initial:
+            # Non-empty caller-supplied base_dir: do not manage or remove it.
+            base_dir_removable = False
+        else:
+            marker = base_dir / MANAGED_BASE_MARKER
+            marker.write_text("managed\n", encoding="utf-8")
+            base_dir_removable = True
     else:
         base_dir = runtime_root
+        base_dir_removable = runtime_root_removable
+
+    if not runtime_root.resolve().is_relative_to(base_dir.resolve()):
+        errors.append("--runtime-root must be inside --base-dir")
+        _cleanup(
+            base_dir, runtime_root, args.keep_artifacts, base_dir_removable, runtime_root_removable
+        )
+        return errors
 
     canary_fixture = Path(args.canary_fixture).resolve() if args.canary_fixture else None
     existing_hooks_path = Path(args.existing_hooks).resolve() if args.existing_hooks else None
@@ -497,33 +606,41 @@ def run_contract(args: argparse.Namespace) -> list[str]:
         canary.mkdir(parents=True, exist_ok=True)
 
     existing_bytes: bytes | None = None
+    existing_hooks_source_path: Path | None = None
     if existing_hooks_path:
-        hooks_file = canary / ".devin" / "hooks.v1.json"
-        hooks_file.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(existing_hooks_path, hooks_file)
-        existing_bytes = hooks_file.read_bytes()
+        existing_bytes = existing_hooks_path.read_bytes()
+        existing_hooks_source_path = existing_hooks_path
+    elif canary_fixture and (canary_fixture / ".devin" / "hooks.v1.json").is_file():
+        existing_bytes = (canary_fixture / ".devin" / "hooks.v1.json").read_bytes()
+        existing_hooks_source_path = canary_fixture / ".devin" / "hooks.v1.json"
+
+    base_dir_initial = _snapshot_base_dir(base_dir)
 
     try:
-        _proc, returncode, run_dir, _stdout, stderr = run_candidate(args, runtime_root, canary)
+        _proc, returncode, run_dir, stdout, stderr = run_candidate(args, runtime_root, canary)
     except RuntimeError as exc:
         errors.append(str(exc))
-        if not args.keep_artifacts:
-            shutil.rmtree(base_dir, ignore_errors=True)
+        _cleanup(
+            base_dir, runtime_root, args.keep_artifacts, base_dir_removable, runtime_root_removable
+        )
         return errors
 
     if returncode != 0:
         errors.append(f"Candidate exited with code {returncode}")
         if stderr:
             text = stderr.decode("utf-8", errors="replace").replace("\n", " ").strip()
-            # Capture the tail so the actual exception message is visible.
             errors.append(f"stderr: ...{text[-500:]}")
 
     if run_dir is None:
-        run_dir = find_run_dir(runtime_root)
+        # When the candidate timed out, the runner already attempted to reap it;
+        # do not wait again for a run directory that may never appear.
+        search_timeout = 0.5 if returncode == -1 else 10.0
+        run_dir = find_run_dir(runtime_root, timeout=search_timeout)
     if run_dir is None:
         errors.append("No run directory found under runtime root")
-        if not args.keep_artifacts:
-            shutil.rmtree(base_dir, ignore_errors=True)
+        _cleanup(
+            base_dir, runtime_root, args.keep_artifacts, base_dir_removable, runtime_root_removable
+        )
         return errors
 
     manifest_path = run_dir / "manifest.json"
@@ -541,8 +658,9 @@ def run_contract(args: argparse.Namespace) -> list[str]:
         errors.append("events/ directory missing")
 
     if errors:
-        if not args.keep_artifacts:
-            shutil.rmtree(base_dir, ignore_errors=True)
+        _cleanup(
+            base_dir, runtime_root, args.keep_artifacts, base_dir_removable, runtime_root_removable
+        )
         return errors
 
     manifest = load_json(manifest_path)
@@ -638,12 +756,13 @@ def run_contract(args: argparse.Namespace) -> list[str]:
         elif hooks_file.read_bytes() != existing_bytes:
             errors.append("Existing hook fixture bytes changed")
         else:
-            original_mode = stat.S_IMODE(Path(args.existing_hooks).stat().st_mode)
-            if stat.S_IMODE(hooks_file.stat().st_mode) != original_mode:
-                errors.append("Existing hook fixture mode was not preserved")
+            if existing_hooks_source_path is not None:
+                original_mode = stat.S_IMODE(existing_hooks_source_path.stat().st_mode)
+                if stat.S_IMODE(hooks_file.stat().st_mode) != original_mode:
+                    errors.append("Existing hook fixture mode was not preserved")
 
     _check_lifecycle(run_dir / "lifecycle.log", errors)
-    _no_outside_writes(base_dir, runtime_root, errors)
+    _no_outside_writes(base_dir, runtime_root, base_dir_initial, errors)
 
     secret_hits = secret_scan(run_dir, redact=runtime_root) + secret_scan(
         canary, redact=runtime_root
@@ -652,8 +771,9 @@ def run_contract(args: argparse.Namespace) -> list[str]:
         for hit in secret_hits[:10]:
             errors.append(f"Secret-like pattern: {hit}")
 
-    if not args.keep_artifacts:
-        shutil.rmtree(base_dir, ignore_errors=True)
+    _cleanup(
+        base_dir, runtime_root, args.keep_artifacts, base_dir_removable, runtime_root_removable
+    )
 
     return errors
 
