@@ -13,8 +13,18 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
+import schema_validator
+
 DEFAULT_MODEL = "swe-1-7"
 DEFAULT_PERMISSION = "accept-edits"
+LIFECYCLE_LABELS = [
+    "supervisor_start",
+    "sidecar_start",
+    "child_start",
+    "child_end",
+    "sidecar_stop",
+    "supervisor_end",
+]
 SECRET_PATTERNS = [
     re.compile(r"\bapi[_-]?key\b", re.IGNORECASE),
     re.compile(r"\btoken\b", re.IGNORECASE),
@@ -46,7 +56,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--runtime-root",
         default=None,
-        help="Optional parent directory for the private runtime directory.",
+        help="Directory for the private runtime directory.",
+    )
+    parser.add_argument(
+        "--base-dir",
+        default=None,
+        help="Parent directory used to detect writes outside the runtime root.",
     )
     parser.add_argument("--tty", action="store_true", help="Run the candidate under a PTY.")
     parser.add_argument(
@@ -99,6 +114,23 @@ def find_run_dir(runtime_root: Path) -> Path | None:
     return None
 
 
+def _first_command(hooks_config: Any) -> str | None:
+    if not isinstance(hooks_config, dict):
+        return None
+    for event_name, entries in hooks_config.items():
+        if not isinstance(entries, list):
+            continue
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            for hook in entry.get("hooks", []):
+                if isinstance(hook, dict):
+                    cmd = hook.get("command")
+                    if cmd:
+                        return str(cmd)
+    return None
+
+
 def run_candidate(
     args: argparse.Namespace, runtime_root: Path, canary: Path
 ) -> tuple[subprocess.Popen, int]:
@@ -121,6 +153,12 @@ def run_candidate(
     env = os.environ.copy()
     env["GOAL_DEVIN_FAKE_EXIT_CODE"] = "0"
     env["GOAL_DEVIN_FAKE_SLEEP"] = "0.1"
+
+    if args.existing_hooks:
+        existing = load_json(Path(args.existing_hooks))
+        expected_cmd = _first_command(existing)
+        if expected_cmd:
+            env["GOAL_DEVIN_EXPECTED_EXISTING_HOOK_COMMAND"] = expected_cmd
 
     if args.tty:
         import pty
@@ -154,6 +192,34 @@ def run_candidate(
     return proc, proc.returncode
 
 
+def _check_lifecycle(log_path: Path, errors: list[str]) -> None:
+    if not log_path.exists():
+        errors.append("lifecycle.log missing")
+        return
+    lines = [
+        line.strip() for line in log_path.read_text(encoding="utf-8").splitlines() if line.strip()
+    ]
+    labels = [line.split()[0] for line in lines if line]
+    for label in LIFECYCLE_LABELS:
+        if label not in labels:
+            errors.append(f"lifecycle.log missing {label}")
+    for i in range(len(LIFECYCLE_LABELS) - 1):
+        a = LIFECYCLE_LABELS[i]
+        b = LIFECYCLE_LABELS[i + 1]
+        if a in labels and b in labels:
+            if labels.index(a) > labels.index(b):
+                errors.append(f"lifecycle ordering violated: {a} after {b}")
+
+
+def _no_outside_writes(base_dir: Path, runtime_root: Path, errors: list[str]) -> None:
+    runtime_resolved = runtime_root.resolve()
+    for path in base_dir.rglob("*"):
+        if path.is_file() or path.is_dir():
+            resolved = path.resolve()
+            if not resolved.is_relative_to(runtime_resolved):
+                errors.append(f"File or directory outside runtime root: {resolved}")
+
+
 def run_contract(args: argparse.Namespace) -> list[str]:
     errors: list[str] = []
 
@@ -162,6 +228,12 @@ def run_contract(args: argparse.Namespace) -> list[str]:
         runtime_root.mkdir(parents=True, exist_ok=True)
     else:
         runtime_root = Path(tempfile.mkdtemp(prefix="goal-devin-contract-"))
+
+    if args.base_dir:
+        base_dir = Path(args.base_dir).resolve()
+        base_dir.mkdir(parents=True, exist_ok=True)
+    else:
+        base_dir = runtime_root
 
     canary = runtime_root / "canary"
     if args.canary_fixture:
@@ -191,7 +263,7 @@ def run_contract(args: argparse.Namespace) -> list[str]:
     if run_dir is None:
         errors.append("No run directory found under runtime root")
         if not args.keep_artifacts:
-            shutil.rmtree(runtime_root, ignore_errors=True)
+            shutil.rmtree(base_dir, ignore_errors=True)
         return errors
 
     manifest_path = run_dir / "manifest.json"
@@ -210,12 +282,23 @@ def run_contract(args: argparse.Namespace) -> list[str]:
 
     if errors:
         if not args.keep_artifacts:
-            shutil.rmtree(runtime_root, ignore_errors=True)
+            shutil.rmtree(base_dir, ignore_errors=True)
         return errors
 
     manifest = load_json(manifest_path)
     summary = load_json(summary_path)
     record = load_json(record_path)
+
+    errors.extend(
+        schema_validator.validate_file(
+            manifest, Path(__file__).parent / "expected" / "manifest.schema.json"
+        )
+    )
+    errors.extend(
+        schema_validator.validate_file(
+            summary, Path(__file__).parent / "expected" / "summary.schema.json"
+        )
+    )
 
     check_directory_mode(run_dir, 0o700, "run_dir", errors)
     check_directory_mode(events_dir, 0o700, "events_dir", errors)
@@ -235,10 +318,13 @@ def run_contract(args: argparse.Namespace) -> list[str]:
         errors.append(f"fake-devin saw permission_mode {record.get('permission_mode')}")
     if record.get("cwd") != str(canary.resolve()):
         errors.append(f"fake-devin cwd mismatch: {record.get('cwd')}")
-    if "--model" not in record.get("argv", []):
+    argv = record.get("argv", [])
+    if "--model" not in argv:
         errors.append("fake-devin argv missing --model")
-    if "--permission-mode" not in record.get("argv", []):
+    if "--permission-mode" not in argv:
         errors.append("fake-devin argv missing --permission-mode")
+    if "-p" in argv or "--print" in argv:
+        errors.append("fake-devin argv contains print mode flag -p/--print")
 
     profile_id = manifest.get("profile_id")
     if not profile_id:
@@ -248,6 +334,8 @@ def run_contract(args: argparse.Namespace) -> list[str]:
 
     if args.tty:
         tty = record.get("tty", {})
+        if not tty.get("stdin"):
+            errors.append("fake-devin did not observe a TTY stdin")
         if not tty.get("stdout"):
             errors.append("fake-devin did not observe a TTY stdout")
         if not tty.get("stderr"):
@@ -262,6 +350,11 @@ def run_contract(args: argparse.Namespace) -> list[str]:
     if event_files:
         try:
             event = load_json(event_files[0])
+            errors.extend(
+                schema_validator.validate_file(
+                    event, Path(__file__).parent / "expected" / "event.schema.json"
+                )
+            )
             if event.get("tool_name") != "run_subagent":
                 errors.append("event tool_name is not run_subagent")
             if event.get("profile") != profile_id:
@@ -285,6 +378,9 @@ def run_contract(args: argparse.Namespace) -> list[str]:
         elif hooks_file.read_bytes() != existing_bytes:
             errors.append("Existing hook fixture bytes changed")
 
+    _check_lifecycle(run_dir / "lifecycle.log", errors)
+    _no_outside_writes(base_dir, runtime_root, errors)
+
     secret_hits = secret_scan(run_dir, redact=runtime_root) + secret_scan(
         canary, redact=runtime_root
     )
@@ -293,7 +389,7 @@ def run_contract(args: argparse.Namespace) -> list[str]:
             errors.append(f"Secret-like pattern: {hit}")
 
     if not args.keep_artifacts:
-        shutil.rmtree(runtime_root, ignore_errors=True)
+        shutil.rmtree(base_dir, ignore_errors=True)
 
     return errors
 

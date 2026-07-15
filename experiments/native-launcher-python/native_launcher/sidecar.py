@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Read-only sidecar that observes atomically renamed event files."""
 
+import datetime
 import json
 import os
 import signal
@@ -14,12 +15,25 @@ from .utils import atomic_write
 POLL_INTERVAL = 0.05
 
 
+def _lifecycle_log(path: Path | None, label: str) -> None:
+    if path is None:
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    now = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    with open(path, "a", encoding="utf-8") as fh:
+        fh.write(f"{label} {now}\n")
+        fh.flush()
+        os.fsync(fh.fileno())
+
+
 class Sidecar:
     def __init__(self, runtime_dir: Path) -> None:
         self.runtime_dir = Path(runtime_dir)
         self.events_dir = self.runtime_dir / "events"
         self.summary_path = self.runtime_dir / "summary.json"
         self.schema_path = self.runtime_dir / "event.schema.json"
+        lifecycle_path = os.environ.get("GOAL_DEVIN_LIFECYCLE_LOG")
+        self.lifecycle_path = Path(lifecycle_path) if lifecycle_path else None
         self.consumed: set[str] = set()
         self.tools: dict[str, int] = {}
         self.profiles: dict[str, int] = {}
@@ -76,9 +90,30 @@ class Sidecar:
         }
         self._update_summary()
 
+    def _drain(self) -> None:
+        try:
+            for name in os.listdir(self.events_dir):
+                path = self.events_dir / name
+                if path.is_file():
+                    self._process_file(path)
+        except OSError:
+            pass
+
+    def _signal_ready(self) -> None:
+        ready_path = self.runtime_dir / "sidecar-ready"
+        try:
+            with open(ready_path, "w", encoding="utf-8") as fh:
+                fh.write("ready\n")
+                fh.flush()
+                os.fsync(fh.fileno())
+        except OSError:
+            pass
+
     def run(self) -> int:
         self.events_dir.mkdir(parents=True, exist_ok=True)
         self._update_summary()
+        _lifecycle_log(self.lifecycle_path, "sidecar_start")
+        self._signal_ready()
 
         def _stop(signum, _frame):  # noqa: ANN001
             self.running = False
@@ -87,16 +122,12 @@ class Sidecar:
         signal.signal(signal.SIGINT, _stop)
 
         while self.running:
-            try:
-                for name in os.listdir(self.events_dir):
-                    path = self.events_dir / name
-                    if path.is_file():
-                        self._process_file(path)
-            except OSError:
-                pass
+            self._drain()
             time.sleep(POLL_INTERVAL)
 
+        self._drain()
         self._update_summary()
+        _lifecycle_log(self.lifecycle_path, "sidecar_stop")
         return 0
 
 

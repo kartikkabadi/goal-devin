@@ -75,14 +75,16 @@ def extract_event(payload: dict) -> dict:
 
 
 def main(events_dir: Path | None = None) -> int:
-    events_dir = events_dir or Path(os.environ["GOAL_DEVIN_EVENTS_DIR"])
-    payload = _read_payload()
-    event = extract_event(payload)
-    event_id = os.urandom(16).hex()
-    tmp_path = events_dir / f"{event_id}.tmp"
-    final_path = events_dir / f"{event_id}.json"
-    _atomic_write(tmp_path, json.dumps(event, indent=2))
-    os.rename(tmp_path, final_path)
+    """Publish a sanitized event; always exit zero so Devin is never blocked."""
+    try:
+        events_dir = events_dir or Path(os.environ["GOAL_DEVIN_EVENTS_DIR"])
+        payload = _read_payload()
+        event = extract_event(payload)
+        event_id = os.urandom(16).hex()
+        final_path = events_dir / f"{event_id}.json"
+        _atomic_write(final_path, json.dumps(event, indent=2))
+    except Exception:
+        pass
     return 0
 
 

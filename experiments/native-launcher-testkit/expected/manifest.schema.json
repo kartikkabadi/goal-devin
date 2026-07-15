@@ -11,7 +11,10 @@
     "permission_mode": { "type": "string" },
     "devin_bin": { "type": "string" },
     "canary": { "type": "string" },
-    "hook_command": { "type": "string" },
+    "hook_command": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
     "profile_id": { "type": "string" },
     "profile_path": { "type": "string" },
     "events_dir": { "type": "string" },

@@ -1,18 +1,43 @@
 """Supervisor that manages the sidecar, fake Devin child, and cleanup."""
 
+import datetime
 import json
 import os
+import re
 import shlex
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 from . import __version__
 from .manifest import make_manifest
 from .profile import make_profile, make_profile_id, remove_profile
 from .utils import atomic_write, mkdir_private, random_id, safe_path_under
+
+
+def _validate_model(model: str) -> None:
+    if not isinstance(model, str) or not re.fullmatch(r"[A-Za-z0-9_.:/-]+", model):
+        raise ValueError("model must be a one-line identifier")
+
+
+def _validate_permission_mode(mode: str) -> None:
+    if not isinstance(mode, str) or not re.fullmatch(r"[A-Za-z0-9_-]+", mode):
+        raise ValueError("permission-mode must be a one-line identifier")
+
+
+def _lifecycle_log(path: Path | None, label: str) -> None:
+    if path is None:
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    now = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    with open(path, "a", encoding="utf-8") as fh:
+        fh.write(f"{label} {now}\n")
+        fh.flush()
+        os.fsync(fh.fileno())
 
 
 def _candidate_dir() -> Path:
@@ -22,6 +47,8 @@ def _candidate_dir() -> Path:
 
 class Supervisor:
     def __init__(self, args: SimpleNamespace) -> None:
+        _validate_model(args.model)
+        _validate_permission_mode(args.permission_mode)
         self.model = args.model
         self.permission_mode = args.permission_mode
         self.devin_bin = Path(args.devin_bin).resolve()
@@ -45,12 +72,15 @@ class Supervisor:
         self.devin_returncode: int | None = None
         self.original_hooks_bytes: bytes | None = None
         self.testkit_dir: Path | None = None
+        self.lifecycle_path: Path | None = None
 
     def _env(self) -> dict[str, str]:
         env = os.environ.copy()
         env["GOAL_DEVIN_RUNTIME_DIR"] = str(self.runtime_dir)
         if self.events_dir:
             env["GOAL_DEVIN_EVENTS_DIR"] = str(self.events_dir)
+        if self.lifecycle_path:
+            env["GOAL_DEVIN_LIFECYCLE_LOG"] = str(self.lifecycle_path)
         candidate_dir = _candidate_dir()
         old_pythonpath = env.get("PYTHONPATH", "")
         env["PYTHONPATH"] = (
@@ -89,35 +119,35 @@ class Supervisor:
 
         if hooks_file.exists():
             self.original_hooks_bytes = hooks_file.read_bytes()
+            try:
+                existing_config = json.loads(self.original_hooks_bytes.decode("utf-8"))
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                existing_config = {}
+        else:
+            existing_config = {}
 
         command_str = " ".join(shlex.quote(str(part)) for part in hook_command)
-        config = {
-            "PreToolUse": [
+        goal_devin_entry = {
+            "matcher": "",
+            "hooks": [
                 {
-                    "matcher": "",
-                    "hooks": [
-                        {
-                            "type": "command",
-                            "command": command_str,
-                            "timeout": 5,
-                        }
-                    ],
-                }
-            ],
-            "PostToolUse": [
-                {
-                    "matcher": "",
-                    "hooks": [
-                        {
-                            "type": "command",
-                            "command": command_str,
-                            "timeout": 5,
-                        }
-                    ],
+                    "type": "command",
+                    "command": command_str,
+                    "timeout": 5,
                 }
             ],
         }
-        atomic_write(hooks_file, json.dumps(config, indent=2), file_mode=0o600)
+
+        new_config: dict[str, Any] = {}
+        for event_name in ("PreToolUse", "PostToolUse"):
+            new_config[event_name] = [goal_devin_entry] + existing_config.get(event_name, [])
+
+        # Preserve any other event keys the existing fixture may contain.
+        for key, value in existing_config.items():
+            if key not in new_config:
+                new_config[key] = value
+
+        atomic_write(hooks_file, json.dumps(new_config, indent=2), file_mode=0o600)
 
     def _restore_canary_hook(self) -> None:
         if self.canary is None:
@@ -162,12 +192,17 @@ class Supervisor:
             stderr=subprocess.DEVNULL,
             start_new_session=True,
         )
+        ready_path = self.runtime_dir / "sidecar-ready"
+        deadline = time.monotonic() + 5
+        while not ready_path.exists() and time.monotonic() < deadline:
+            if self.sidecar_proc.poll() is not None:
+                break
+            time.sleep(0.01)
 
     def _run_devin(self) -> None:
         env = self._env()
         cmd = [
             str(self.devin_bin),
-            "-p",
             "--model",
             self.model,
             "--permission-mode",
@@ -214,6 +249,9 @@ class Supervisor:
 
     def run(self) -> int:
         """Execute the happy-path lifecycle and return the child's exit code."""
+        self.lifecycle_path = self.runtime_dir / "lifecycle.log"
+        _lifecycle_log(self.lifecycle_path, "supervisor_start")
+
         self.testkit_dir = self._find_testkit_dir()
 
         mkdir_private(self.runtime_dir, mode=0o700)
@@ -253,6 +291,7 @@ class Supervisor:
             self._run_devin()
         finally:
             self._stop_sidecar()
+            _lifecycle_log(self.lifecycle_path, "supervisor_end")
 
         if self.profile_id:
             remove_profile(self.canary, self.profile_id)
@@ -263,6 +302,12 @@ class Supervisor:
 
         if not self.keep_canary and self.canary is not None:
             shutil.rmtree(self.canary, ignore_errors=True)
+
+        ready_path = self.runtime_dir / "sidecar-ready"
+        try:
+            ready_path.unlink()
+        except FileNotFoundError:
+            pass
 
         if self.devin_returncode is None:
             return 1

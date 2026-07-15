@@ -27,7 +27,9 @@ def _run_contract(
     keep: bool = False,
     extra_env: dict | None = None,
 ) -> tuple[int, list[str], Path | None]:
-    runtime_root = Path(tempfile.mkdtemp(prefix="goal-devin-r1a1-test-"))
+    base_dir = Path(tempfile.mkdtemp(prefix="goal-devin-r1a1-test-"))
+    runtime_root = base_dir / "runtime"
+    runtime_root.mkdir(parents=True, exist_ok=True)
     cmd = [
         "python3",
         str(RUN_CONTRACT),
@@ -39,6 +41,8 @@ def _run_contract(
         str(CANARY_FIXTURE),
         "--runtime-root",
         str(runtime_root),
+        "--base-dir",
+        str(base_dir),
     ]
     if existing_hooks:
         cmd.extend(["--existing-hooks", str(EXISTING_HOOKS)])
@@ -65,8 +69,9 @@ def _run_contract(
 @pytest.fixture
 def contract_pass(tmp_path):
     """Run the contract and return the runtime directory for assertions."""
-    runtime_root = tmp_path / "runtime"
-    runtime_root.mkdir()
+    base_dir = tmp_path / "base"
+    runtime_root = base_dir / "runtime"
+    runtime_root.mkdir(parents=True, exist_ok=True)
     cmd = [
         "python3",
         str(RUN_CONTRACT),
@@ -78,6 +83,8 @@ def contract_pass(tmp_path):
         str(CANARY_FIXTURE),
         "--runtime-root",
         str(runtime_root),
+        "--base-dir",
+        str(base_dir),
         "--keep-artifacts",
     ]
     result = subprocess.run(
@@ -96,6 +103,12 @@ def contract_pass(tmp_path):
 def test_happy_path_lifecycle():
     rc, errors, _ = _run_contract()
     assert rc == 0, "\n".join(errors)
+
+
+def test_no_print_mode_flag_in_argv(contract_pass):
+    record = json.loads((contract_pass / "fake-devin.record.json").read_text())
+    assert "-p" not in record["argv"]
+    assert "--print" not in record["argv"]
 
 
 def test_exact_argv(contract_pass):
@@ -176,12 +189,16 @@ def test_profile_cleanup(contract_pass):
 
 
 def test_no_writes_outside_allowed_roots(contract_pass):
+    base_dir = contract_pass.parent.parent
     manifest = json.loads((contract_pass / "manifest.json").read_text())
     runtime_root = Path(manifest["summary_path"]).parent.parent
     canary = Path(manifest["canary"])
     for root in (runtime_root, canary):
         for path in root.rglob("*"):
             assert path.resolve().is_relative_to(root.resolve())
+    for path in base_dir.rglob("*"):
+        if path.is_file() or path.is_dir():
+            assert path.resolve().is_relative_to(runtime_root.resolve())
 
 
 def test_secret_scan_of_generated_artifacts(contract_pass):
@@ -211,6 +228,56 @@ def test_secret_scan_of_generated_artifacts(contract_pass):
 def test_tty_inheritance():
     rc, errors, _ = _run_contract(tty=True)
     assert rc == 0, "\n".join(errors)
+
+
+def test_lifecycle_order(contract_pass):
+    log_path = contract_pass / "lifecycle.log"
+    assert log_path.exists()
+    lines = [
+        line.strip() for line in log_path.read_text(encoding="utf-8").splitlines() if line.strip()
+    ]
+    labels = [line.split()[0] for line in lines]
+    expected = [
+        "supervisor_start",
+        "sidecar_start",
+        "child_start",
+        "child_end",
+        "sidecar_stop",
+        "supervisor_end",
+    ]
+    for label in expected:
+        assert label in labels
+    for i in range(len(expected) - 1):
+        assert labels.index(expected[i]) < labels.index(expected[i + 1])
+
+
+def test_sidecar_consumed_event_before_child_exit(contract_pass):
+    record = json.loads((contract_pass / "fake-devin.record.json").read_text())
+    assert record.get("sidecar_total_events", 0) >= 1
+
+
+def test_hook_is_fail_open():
+    hook_script = (
+        REPO_ROOT / "experiments" / "native-launcher-python" / "native_launcher" / "hook.py"
+    )
+    # Malformed input and missing events dir must not block Devin.
+    result = subprocess.run(
+        ["python3", str(hook_script)],
+        input="not-json",
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    assert result.returncode == 0
+    # Oversized input must also exit zero.
+    result = subprocess.run(
+        ["python3", str(hook_script)],
+        input="x" * (1024 * 1024 + 1),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    assert result.returncode == 0
 
 
 def test_production_source_tree_unchanged():

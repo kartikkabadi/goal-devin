@@ -1,5 +1,6 @@
 """Temporary worker profile generation."""
 
+import re
 from pathlib import Path
 
 from .utils import atomic_write, mkdir_private, random_id
@@ -12,6 +13,8 @@ def make_profile_id() -> str:
 
 def make_profile(canary: Path, profile_id: str, model: str) -> Path:
     """Create a read-only AGENT.md profile under the canary and return its path."""
+    if not re.fullmatch(r"[A-Za-z0-9_.:/-]+", model):
+        raise ValueError("model must be a one-line identifier safe for YAML")
     profile_dir = canary / ".devin" / "agents" / profile_id
     mkdir_private(profile_dir, mode=0o700)
     profile_path = profile_dir / "AGENT.md"
