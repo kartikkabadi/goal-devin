@@ -1,0 +1,224 @@
+#!/usr/bin/env python3
+"""Deterministic fake `devin` for Goal Devin baseline research.
+
+Records every invocation and mimics the minimum surface Goal Devin needs:
+  - --version / version
+  - --help
+  - -p / --print (create a session)
+  - -r <sid> -p / --resume <sid> --print (resume a session)
+  - list --format json
+  - auth status
+
+Set GOAL_DEVIN_FAKE_STATE to an existing directory for isolated state.
+Default state dir is ~/.local/share/goal-devin-fake/.
+"""
+
+import hashlib
+import json
+import os
+import sys
+import time
+from datetime import datetime
+from pathlib import Path
+
+VERSION = "3000.1.27-fake"
+STATE_VAR = "GOAL_DEVIN_FAKE_STATE"
+
+
+def _state_dir():
+    base = os.environ.get(STATE_VAR) or os.path.expanduser("~/.local/share/goal-devin-fake")
+    p = Path(base)
+    p.mkdir(parents=True, exist_ok=True)
+    return p
+
+
+def _journal_path():
+    return _state_dir() / "invocations.jsonl"
+
+
+def _sessions_path():
+    return _state_dir() / "sessions.jsonl"
+
+
+def _record(
+    argv,
+    cwd,
+    env_keys,
+    stdout,
+    stderr,
+    exit_code,
+    created_session=None,
+):
+    entry = {
+        "timestamp": datetime.now().isoformat(timespec="seconds"),
+        "argv": argv,
+        "cwd": str(cwd),
+        "env_keys": env_keys,
+        "stdout": stdout,
+        "stderr": stderr,
+        "exit_code": exit_code,
+        "created_session": created_session,
+    }
+    with open(_journal_path(), "a") as f:
+        f.write(json.dumps(entry) + "\n")
+
+
+def _make_sid(cwd, prompt):
+    """Stable-ish session ID derived from cwd and prompt hash plus a counter."""
+    base = f"{cwd}:{prompt}:{time.time()}"
+    return "devin-" + hashlib.sha1(base.encode()).hexdigest()[:16]
+
+
+def _load_sessions():
+    path = _sessions_path()
+    if not path.exists():
+        return []
+    sessions = []
+    for line in path.read_text().splitlines():
+        if line.strip():
+            sessions.append(json.loads(line))
+    return sessions
+
+
+def _save_session(s):
+    with open(_sessions_path(), "a") as f:
+        f.write(json.dumps(s) + "\n")
+
+
+def _env_keys():
+    """Return sorted list of environment variable names (never values)."""
+    return sorted(os.environ.keys())
+
+
+def _usage():
+    return (
+        "fake-devin: deterministic stand-in for Goal Devin research\n"
+        "Usage:\n"
+        "  fake-devin --version\n"
+        "  fake-devin --help\n"
+        "  fake-devin -p [--model M] [--permission-mode P] [--sandbox] -- <prompt>\n"
+        "  fake-devin -r <sid> -p [--model M] [--permission-mode P] [--sandbox] -- <prompt>\n"
+        "  fake-devin list --format json\n"
+        "  fake-devin auth status\n"
+    )
+
+
+def main():
+    start = time.time()
+    argv = sys.argv[:]
+    cwd = Path.cwd()
+    env_keys = _env_keys()
+
+    stdout = ""
+    stderr = ""
+    exit_code = 0
+    created_session = None
+
+    if not argv[1:] or argv[1] in ("--help", "-h", "help"):
+        stdout = _usage()
+    elif argv[1] in ("--version", "-v", "version"):
+        stdout = VERSION + "\n"
+    elif argv[1] == "auth":
+        if len(argv) >= 3 and argv[2] == "status":
+            stdout = "Logged in. (fake)\n"
+        else:
+            stderr = "unknown auth subcommand\n"
+            exit_code = 1
+    elif argv[1] == "list":
+        if "--format" in argv and "json" in argv:
+            sessions = _load_sessions()
+            stdout = json.dumps(sessions, indent=2) + "\n"
+        else:
+            stderr = "list requires --format json\n"
+            exit_code = 1
+    elif argv[1] in ("-p", "--print"):
+        # consume optional flags then the prompt after -- or the next arg
+        i = 2
+        model = None
+        permission_mode = None
+        sandbox = False
+        while i < len(argv) and argv[i].startswith("-") and argv[i] != "--":
+            if argv[i] in ("-p", "--print"):
+                i += 1
+            elif argv[i] == "--model":
+                model = argv[i + 1]
+                i += 2
+            elif argv[i] == "--permission-mode":
+                permission_mode = argv[i + 1]
+                i += 2
+            elif argv[i] == "--sandbox":
+                sandbox = True
+                i += 1
+            else:
+                stderr = f"unknown flag {argv[i]}\n"
+                exit_code = 1
+                break
+
+        if exit_code == 0:
+            if i < len(argv) and argv[i] == "--":
+                prompt = " ".join(argv[i + 1 :])
+            elif i < len(argv):
+                prompt = argv[i]
+            else:
+                prompt = ""
+            sid = _make_sid(str(cwd), prompt)
+            created_session = sid
+            model = model or "glm-5.2"
+            _save_session(
+                {
+                    "id": sid,
+                    "working_directory": str(cwd),
+                    "prompt": prompt,
+                    "model": model,
+                    "permission_mode": permission_mode or "dangerous",
+                    "sandbox": sandbox,
+                    "created_at": datetime.now().isoformat(timespec="seconds"),
+                }
+            )
+            stdout = f"[fake-devin] session {sid}: did work for iter 0\n"
+    elif argv[1] in ("-r", "--resume"):
+        if len(argv) < 3:
+            stderr = "resume requires a session id\n"
+            exit_code = 1
+        else:
+            sid = argv[2]
+            # skip any resume flag parsing for simplicity
+            rest = argv[3:]
+            i = 0
+            model = None
+            permission_mode = None
+            sandbox = False
+            while i < len(rest) and rest[i].startswith("-") and rest[i] != "--":
+                if rest[i] in ("-p", "--print"):
+                    i += 1
+                elif rest[i] == "--model":
+                    model = rest[i + 1]
+                    i += 2
+                elif rest[i] == "--permission-mode":
+                    permission_mode = rest[i + 1]
+                    i += 2
+                elif rest[i] == "--sandbox":
+                    sandbox = True
+                    i += 1
+                else:
+                    i += 1
+            if i < len(rest) and rest[i] == "--":
+                prompt = " ".join(rest[i + 1 :])
+            elif i < len(rest):
+                prompt = " ".join(rest[i:])
+            else:
+                prompt = "continue"
+            stdout = f"[fake-devin] session {sid}: continued toward goal ({prompt})\n"
+    else:
+        stderr = f"unrecognized command: {argv[1]}\n"
+        exit_code = 1
+
+    elapsed = time.time() - start
+    _record(argv, cwd, env_keys, stdout, stderr, exit_code, created_session)
+    sys.stdout.write(stdout)
+    sys.stderr.write(stderr)
+    return exit_code
+
+
+if __name__ == "__main__":
+    sys.exit(main())
