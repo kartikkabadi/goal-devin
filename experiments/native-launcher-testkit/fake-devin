@@ -349,13 +349,19 @@ def _main() -> int:
     sidecar_total_events = 0
     if runtime_dir is not None:
         summary_path = runtime_dir / "summary.json"
-        if summary_path.exists():
-            try:
-                sidecar_total_events = json.loads(
-                    summary_path.read_text(encoding="utf-8")
-                ).get("total_events", 0)
-            except (json.JSONDecodeError, OSError):
-                pass
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            if summary_path.exists():
+                try:
+                    total = json.loads(summary_path.read_text(encoding="utf-8")).get(
+                        "total_events", 0
+                    )
+                    if total >= 1:
+                        sidecar_total_events = total
+                        break
+                except (json.JSONDecodeError, OSError):
+                    pass
+            time.sleep(0.05)
 
     exit_code = int(os.environ.get("GOAL_DEVIN_FAKE_EXIT_CODE", DEFAULT_EXIT_CODE))
 
