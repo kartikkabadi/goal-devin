@@ -267,10 +267,19 @@ def test_no_writes_outside_allowed_roots(contract_pass):
     manifest = json.loads((contract_pass / "manifest.json").read_text())
     runtime_root = Path(manifest["summary_path"]).parent.parent
     canary = Path(manifest["canary"])
+    fixture_symlinks = {
+        (canary / src.relative_to(CANARY_FIXTURE)).resolve()
+        for src in CANARY_FIXTURE.rglob("*")
+        if src.is_symlink()
+    }
     for root in (runtime_root, canary):
         for path in root.rglob("*"):
+            if path.is_symlink() and path.resolve() in fixture_symlinks:
+                continue
             assert path.resolve().is_relative_to(root.resolve())
     for path in base_dir.rglob("*"):
+        if path.is_symlink() and path.resolve() in fixture_symlinks:
+            continue
         if path.is_file() or path.is_dir():
             if path.name == MANAGED_BASE_MARKER and path.parent == base_dir:
                 continue
@@ -561,8 +570,10 @@ def _make_canary_fixture_with_symlink(link_name: str, target: Path) -> Path:
     canary = fixture / "canary"
     canary.mkdir(parents=True)
     for item in CANARY_FIXTURE.iterdir():
-        if item.is_dir():
-            shutil.copytree(item, canary / item.name)
+        if item.is_dir() and not item.is_symlink():
+            shutil.copytree(item, canary / item.name, symlinks=True)
+        elif item.is_symlink():
+            (canary / item.name).symlink_to(os.readlink(item))
         else:
             shutil.copy2(item, canary / item.name)
     parts = Path(link_name).parts
@@ -579,7 +590,7 @@ def test_hooks_json_not_treated_as_standalone():
     """Candidate must ignore .devin/hooks.json and only use .devin/hooks.v1.json."""
     base = Path(tempfile.mkdtemp(prefix="goal-devin-r1a1-hooks-json-"))
     canary_fixture = base / "canary"
-    shutil.copytree(CANARY_FIXTURE, canary_fixture)
+    shutil.copytree(CANARY_FIXTURE, canary_fixture, symlinks=True)
     devin_dir = canary_fixture / ".devin"
     devin_dir.mkdir(parents=True, exist_ok=True)
     seed = {
@@ -738,7 +749,7 @@ def test_runtime_root_outside_base_dir_rejected():
 )
 def test_malformed_hooks_in_canary_fixture_rejected(hooks_content):
     fixture = Path(tempfile.mkdtemp(prefix="goal-devin-malformed-hooks-"))
-    shutil.copytree(CANARY_FIXTURE, fixture, dirs_exist_ok=True)
+    shutil.copytree(CANARY_FIXTURE, fixture, symlinks=True, dirs_exist_ok=True)
     hooks_file = fixture / ".devin" / "hooks.v1.json"
     hooks_file.parent.mkdir(parents=True, exist_ok=True)
     hooks_file.write_text(hooks_content, encoding="utf-8")
@@ -1998,3 +2009,66 @@ def test_runtime_broken_symlink_rejected():
         and ("not owned" in e.lower() or "boundary" in e.lower() or "escapes" in e.lower())
         for e in errors
     ), errors
+
+
+def test_canary_intermediate_symlink_escape_rejected():
+    """A canary symlink whose effective target escapes through a pre-existing
+    intermediate symlink must be rejected.
+    """
+    rc, errors, _ = _run_contract(
+        candidate=TESTKIT / "fixtures" / "canary-intermediate-symlink-escape-candidate.py",
+    )
+    assert rc != 0
+    assert any(
+        "symlink" in e.lower() and ("boundary" in e.lower() or "escapes" in e.lower())
+        for e in errors
+    ), errors
+
+
+def test_runtime_intermediate_symlink_escape_rejected():
+    """A runtime symlink whose lexical target is inside runtime/ but whose effective
+    target escapes through an intermediate symlink must be rejected.
+    """
+    rc, errors, _ = _run_contract(
+        candidate=TESTKIT / "fixtures" / "runtime-intermediate-symlink-escape-candidate.py",
+    )
+    assert rc != 0
+    assert any(
+        "symlink" in e.lower() and ("boundary" in e.lower() or "escapes" in e.lower())
+        for e in errors
+    ), errors
+
+
+def test_sentinel_pid_not_killed_on_timeout():
+    """A candidate that writes a non-descendant sentinel PID into child.pid must be
+    rejected, and the sentinel process must survive timeout cleanup.
+    """
+    sentinel = subprocess.Popen(["sleep", "60"], start_new_session=True)
+    try:
+        rc, errors, _ = _run_contract(
+            candidate=TESTKIT / "fixtures" / "sentinel-pid-timeout-candidate.py",
+            timeout=3,
+            extra_env={"GOAL_DEVIN_SENTINEL_PID": str(sentinel.pid)},
+        )
+        assert rc != 0
+        assert sentinel.poll() is None, "sentinel was killed during timeout cleanup"
+    finally:
+        sentinel.terminate()
+        try:
+            sentinel.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            sentinel.kill()
+            sentinel.wait()
+
+
+def test_fork_bomb_reaped_on_timeout():
+    """A candidate that forks a small tree of child processes must have every
+    descendant reaped by the timeout cleanup.
+    """
+    rc, errors, _ = _run_contract(
+        candidate=TESTKIT / "fixtures" / "fork-bomb-candidate.py",
+        timeout=3,
+    )
+    assert rc != 0
+    time.sleep(0.5)
+    assert _no_process_with("fork-bomb-candidate.py")

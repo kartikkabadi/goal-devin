@@ -309,14 +309,23 @@ def _is_allowed_path(path: Path, runtime_root: Path) -> bool:
         return False
 
 
-def _resolve_symlink_target(link: Path, target: str | None) -> Path | None:
-    """Return the lexical, normalized target path of a symlink, or None."""
+def _effective_symlink_target(link: Path, target: str | None) -> Path | None:
+    """Return the effective, symlink-resolved target path for boundary checks.
+
+    Follows existing intermediate symlinks (and broken tails) by resolving the
+    candidate target relative to the link's parent. Falls back to the lexical
+    absolute path if resolution fails.
+    """
     if target is None:
         return None
     if target.startswith("/"):
-        resolved = Path(os.path.normpath(target))
+        candidate = Path(target)
     else:
-        resolved = Path(os.path.normpath(str(link.parent.absolute() / target)))
+        candidate = link.parent / target
+    try:
+        resolved = candidate.resolve()
+    except OSError:
+        resolved = candidate.absolute()
     try:
         return resolved.absolute()
     except OSError:
@@ -624,6 +633,35 @@ def _descendant_pids(root_pid: int) -> list[int]:
     return sorted(descendants)
 
 
+def _stable_descendant_pids(root_pid: int, max_iter: int = 5, stop_delay: float = 0.05) -> set[int]:
+    """Repeatedly stop *root_pid* and its descendants until the descendant set
+    reaches a fixed point.
+
+    Stopping a process prevents it from forking, so any new PIDs that appear
+    between enumerations can themselves be stopped in the next iteration.
+    """
+    frozen: set[int] = set()
+    for _ in range(max_iter):
+        if root_pid != os.getpid():
+            try:
+                os.kill(root_pid, signal.SIGSTOP)
+            except (OSError, ProcessLookupError):
+                pass
+        current = set(_descendant_pids(root_pid))
+        for pid in current - frozen:
+            if pid == os.getpid():
+                continue
+            try:
+                os.kill(pid, signal.SIGSTOP)
+            except (OSError, ProcessLookupError):
+                pass
+        if current == frozen:
+            return current
+        frozen = current
+        time.sleep(stop_delay)
+    return frozen
+
+
 def _kill_process_tree(
     proc: subprocess.Popen,
     run_dir: Path | None,
@@ -631,29 +669,22 @@ def _kill_process_tree(
 ) -> None:
     """Reap the candidate process tree using stable process identities.
 
-    1. Freeze all descendants (SIGSTOP) so no new processes/PID files can appear.
-    2. Collect PIDs from *valid_pids*, from PID files, and from OS descendants.
-    3. Capture and re-validate start-time identity right before signalling each PID.
-    4. SIGTERM then SIGKILL surviving PIDs and the root process group.
+    1. Reach a fixed point where all descendants are frozen (SIGSTOP).
+    2. Collect PIDs from *valid_pids*, from PID files, and from frozen descendants.
+    3. Capture start-time identity for every candidate PID.
+    4. SIGTERM then SIGKILL only PIDs whose identity and ancestry are re-validated
+       immediately before each signal. No raw fallback signals are sent.
     """
     root_pid = proc.pid
     if proc.poll() is not None and not valid_pids:
         return
 
-    # Freeze the candidate and every visible descendant so the set of PIDs and
-    # PID files cannot grow during the final discovery phase.
-    for pid in [root_pid] + _descendant_pids(root_pid):
-        if pid == os.getpid():
-            continue
-        try:
-            os.kill(pid, signal.SIGSTOP)
-        except (OSError, ProcessLookupError):
-            pass
+    frozen_descendants = _stable_descendant_pids(root_pid)
 
-    discovered: set[int] = set()
+    discovered: set[int] = set(frozen_descendants)
     if valid_pids:
         discovered.update(valid_pids)
-    if run_dir is not None and proc.poll() is None:
+    if run_dir is not None and _is_process_alive(root_pid):
         for name in ("supervisor.pid", "sidecar.pid", "child.pid"):
             pid_path = run_dir / name
             if not pid_path.exists():
@@ -665,53 +696,66 @@ def _kill_process_tree(
             if _pid_is_in_tree(pid, root_pid):
                 discovered.add(pid)
 
-    # OS-level descendants of the frozen tree may include processes that have not
-    # yet written their PID files (for example a delayed sidecar).
-    for pid in _descendant_pids(root_pid):
+    # Capture a single start-time identity for the root and every PID we may signal.
+    # This identity is re-validated before each individual signal below.
+    identities: dict[int, str] = {}
+    for pid in {root_pid} | discovered:
         if pid == os.getpid():
             continue
-        if _pid_is_in_tree(pid, root_pid) and _is_process_alive(pid):
-            discovered.add(pid)
-
-    # Capture stable identities after the freeze but before the kill window.
-    identities: dict[int, str] = {}
-    for pid in discovered:
+        if not _pid_is_in_tree(pid, root_pid) or not _is_process_alive(pid):
+            continue
         st = _pid_start_time(pid)
         if st is not None:
             identities[pid] = st
 
-    for pid in discovered:
+    def _signal_if_valid(pid: int, sig: int) -> None:
         if pid == os.getpid():
-            continue
+            return
         if not _is_process_alive(pid):
-            continue
+            return
         if not _pid_is_in_tree(pid, root_pid):
-            continue
+            return
         current = _pid_start_time(pid)
         if current is None or identities.get(pid) != current:
             # PID was reused or identity cannot be re-proven; do not signal it.
-            continue
+            return
         try:
-            os.kill(pid, signal.SIGTERM)
-        except (OSError, ProcessLookupError):
-            continue
-        time.sleep(0.05)
-        if _is_process_alive(pid):
-            try:
-                os.kill(pid, signal.SIGKILL)
-            except (OSError, ProcessLookupError):
-                pass
-
-    # Ensure the root process group is terminated.
-    for pid in [root_pid] + list(discovered):
-        try:
-            os.kill(pid, signal.SIGKILL)
+            os.kill(pid, sig)
         except (OSError, ProcessLookupError):
             pass
-    try:
-        os.killpg(root_pid, signal.SIGKILL)
-    except (OSError, ProcessLookupError):
-        pass
+
+    # Order PIDs so descendants are signalled before their parents. This prevents
+    # children from being reparented to init while we are still trying to reach
+    # them, which keeps the ancestry re-validation valid.
+    bfs_descendants = _descendant_pids(root_pid)
+    bfs_index = {pid: idx for idx, pid in enumerate(bfs_descendants)}
+    ordered = sorted(
+        (pid for pid in identities if pid != root_pid),
+        key=lambda p: bfs_index.get(p, len(bfs_descendants)),
+        reverse=True,
+    )
+    if root_pid in identities:
+        ordered.append(root_pid)
+
+    # First pass: SIGTERM. Identity and ancestry are checked for each PID.
+    for pid in ordered:
+        _signal_if_valid(pid, signal.SIGTERM)
+
+    time.sleep(0.05)
+
+    # Second pass: SIGKILL. Re-validate identity and ancestry again before each signal.
+    for pid in ordered:
+        _signal_if_valid(pid, signal.SIGKILL)
+
+    # The candidate process group. Only signal while the root PID is still alive and
+    # its identity matches the captured value.
+    if root_pid in identities:
+        try:
+            os.killpg(root_pid, signal.SIGKILL)
+        except (OSError, ProcessLookupError):
+            pass
+    _signal_if_valid(root_pid, signal.SIGKILL)
+
     try:
         proc.wait(timeout=2)
     except subprocess.TimeoutExpired:
@@ -1268,7 +1312,7 @@ def _check_ownership(
         if entry is None:
             return
         if entry.kind == "symlink":
-            target_path = _resolve_symlink_target(path, entry.target)
+            target_path = _effective_symlink_target(path, entry.target)
             if target_path is not None and not _is_allowed_path(target_path, allowed_root):
                 errors.append(
                     f"Generated {label} symlink escapes permitted boundary: {abs_path} -> {entry.target}"
@@ -1565,7 +1609,7 @@ def _check_canary_integrity(
 
         # New path: must be declared/owned; symlinks also checked for boundary escape.
         if entry is not None and entry.kind == "symlink":
-            target_path = _resolve_symlink_target(path, entry.target)
+            target_path = _effective_symlink_target(path, entry.target)
             if target_path is not None and not _is_allowed_path(target_path, allowed_canary):
                 errors.append(
                     f"New canary symlink escapes permitted boundary: {abs_path} -> {entry.target}"
@@ -1857,9 +1901,23 @@ def run_contract(args: argparse.Namespace) -> list[str]:
         errors.append(f"Runner exception: {exc}")
 
     finally:
-        # Canary integrity, secret scan, and cleanup are unconditional: a failing
-        # or malicious candidate must not bypass restoration checks by crashing the
-        # runner or exiting early.
+        # Canary integrity, runtime ownership, secret scan, and cleanup are
+        # unconditional: a failing or malicious candidate must not bypass
+        # restoration checks by crashing the runner or exiting early.
+        try:
+            if run_dir is not None:
+                _check_ownership(
+                    run_dir,
+                    canary,
+                    manifest or {},
+                    canary_fixture,
+                    preexisting_canary_hook,
+                    preexisting_canary_hook_bytes,
+                    errors,
+                )
+        except Exception as exc:
+            errors.append(f"Ownership check failed: {exc}")
+
         try:
             _check_canary_integrity(
                 canary,
