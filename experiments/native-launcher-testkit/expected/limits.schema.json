@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": [
+    "max_tool_name_length",
+    "max_profile_length",
+    "max_event_value_length",
+    "max_event_json_bytes",
+    "max_total_spool_bytes",
+    "max_retained_event_files",
+    "max_distinct_tools",
+    "max_distinct_profiles",
+    "max_recent_event_ids",
+    "max_summary_size_bytes"
+  ],
+  "properties": {
+    "max_tool_name_length": { "type": "integer", "minimum": 12 },
+    "max_profile_length": { "type": "integer", "minimum": 34 },
+    "max_event_value_length": { "type": "integer", "minimum": 34 },
+    "max_event_json_bytes": { "type": "integer", "minimum": 256 },
+    "max_total_spool_bytes": { "type": "integer", "minimum": 256 },
+    "max_retained_event_files": { "type": "integer", "minimum": 1 },
+    "max_distinct_tools": { "type": "integer", "minimum": 1 },
+    "max_distinct_profiles": { "type": "integer", "minimum": 1 },
+    "max_recent_event_ids": { "type": "integer", "minimum": 1 },
+    "max_summary_size_bytes": { "type": "integer", "minimum": 256 }
+  },
+  "additionalProperties": false
+}

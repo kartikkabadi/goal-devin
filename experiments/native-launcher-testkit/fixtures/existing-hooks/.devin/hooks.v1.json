@@ -1,0 +1,14 @@
+{
+  "PreToolUse": [
+    {
+      "matcher": "",
+      "hooks": [
+        {
+          "type": "command",
+          "command": "/bin/true",
+          "timeout": 5
+        }
+      ]
+    }
+  ]
+}

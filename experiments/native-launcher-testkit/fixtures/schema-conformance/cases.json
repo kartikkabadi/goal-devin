@@ -1,0 +1,225 @@
+{
+  "malformed_schema_file": "invalid-schema.json",
+  "cases": [
+    {
+      "name": "boolean_vs_integer",
+      "schema": { "type": "integer" },
+      "valid": [0, -1, 42],
+      "invalid": [true, false, 1.5, "1", null]
+    },
+    {
+      "name": "boolean_vs_number",
+      "schema": { "type": "number" },
+      "valid": [0, -1, 1.5, 42.0],
+      "invalid": [true, false, "1", null]
+    },
+    {
+      "name": "boolean_only",
+      "schema": { "type": "boolean" },
+      "valid": [true, false],
+      "invalid": [1, 0, "true", null]
+    },
+    {
+      "name": "nullable_string",
+      "schema": { "type": ["string", "null"] },
+      "valid": ["hello", "", null],
+      "invalid": [true, 123, [], {}]
+    },
+    {
+      "name": "const_integer",
+      "schema": { "type": "integer", "const": 7 },
+      "valid": [7],
+      "invalid": [8, true, 7.0, "7"]
+    },
+    {
+      "name": "const_string",
+      "schema": { "type": "string", "const": "goal-devin" },
+      "valid": ["goal-devin"],
+      "invalid": ["Goal-Devin", "", 123]
+    },
+    {
+      "name": "enum_mixed",
+      "schema": { "enum": [1, "one", true, null] },
+      "valid": [1, "one", true, null],
+      "invalid": [2, "two", false, 0]
+    },
+    {
+      "name": "enum_typed",
+      "schema": { "type": "string", "enum": ["read", "grep", "glob"] },
+      "valid": ["read", "grep", "glob"],
+      "invalid": ["write", "", true, "READ"]
+    },
+    {
+      "name": "required_fields",
+      "schema": {
+        "type": "object",
+        "required": ["tool_name", "profile"],
+        "properties": {
+          "tool_name": { "type": "string" },
+          "profile": { "type": "string" },
+          "is_background": { "type": "boolean" }
+        }
+      },
+      "valid": [
+        { "tool_name": "run_subagent", "profile": "worker-1" },
+        { "tool_name": "run_subagent", "profile": "worker-1", "is_background": false }
+      ],
+      "invalid": [
+        { "tool_name": "run_subagent" },
+        { "profile": "worker-1" },
+        {}
+      ]
+    },
+    {
+      "name": "additional_properties_false",
+      "schema": {
+        "type": "object",
+        "properties": {
+          "tool_name": { "type": "string" },
+          "profile": { "type": "string" }
+        },
+        "additionalProperties": false
+      },
+      "valid": [
+        { "tool_name": "run_subagent", "profile": "worker-1" },
+        { "tool_name": "run_subagent" }
+      ],
+      "invalid": [
+        { "tool_name": "run_subagent", "profile": "worker-1", "extra": "field" },
+        { "extra": "field" }
+      ]
+    },
+    {
+      "name": "additional_properties_schema",
+      "schema": {
+        "type": "object",
+        "properties": {
+          "tool_name": { "type": "string" }
+        },
+        "additionalProperties": { "type": "integer" }
+      },
+      "valid": [
+        { "tool_name": "run_subagent", "count": 1 },
+        { "count": 0 }
+      ],
+      "invalid": [
+        { "tool_name": "run_subagent", "count": "one" },
+        { "count": true }
+      ]
+    },
+    {
+      "name": "array_items",
+      "schema": {
+        "type": "array",
+        "items": { "type": "string" }
+      },
+      "valid": [
+        ["read"],
+        ["read", "grep"],
+        ["read", "grep", "glob"]
+      ],
+      "invalid": [
+        ["read", 123],
+        [true],
+        ["read", null]
+      ]
+    },
+    {
+      "name": "string_minLength",
+      "schema": { "type": "string", "minLength": 3 },
+      "valid": ["abc", "hello"],
+      "invalid": ["ab", "", 12, true]
+    },
+    {
+      "name": "number_minimum_maximum",
+      "schema": { "type": "number", "minimum": 0, "maximum": 100 },
+      "valid": [0, 50, 100, 1.5],
+      "invalid": [-1, 101, true, -0.1]
+    },
+    {
+      "name": "nested_object",
+      "schema": {
+        "type": "object",
+        "properties": {
+          "last_event": {
+            "type": "object",
+            "required": ["tool_name"],
+            "properties": {
+              "tool_name": { "type": "string" },
+              "is_background": { "type": "boolean" }
+            },
+            "additionalProperties": false
+          }
+        },
+        "required": ["last_event"]
+      },
+      "valid": [
+        { "last_event": { "tool_name": "run_subagent", "is_background": false } },
+        { "last_event": { "tool_name": "run_subagent" } }
+      ],
+      "invalid": [
+        { "last_event": { "tool_name": "run_subagent", "extra": 1 } },
+        { "last_event": { "is_background": false } },
+        { "last_event": "run_subagent" },
+        {}
+      ]
+    },
+    {
+      "name": "event_schema_like",
+      "schema": {
+        "type": "object",
+        "required": ["schema_version", "event", "tool_name", "profile", "is_background", "success", "observed_at"],
+        "properties": {
+          "schema_version": { "type": "integer" },
+          "event": { "type": "string" },
+          "tool_name": { "type": "string" },
+          "profile": { "type": "string" },
+          "is_background": { "type": "boolean" },
+          "success": { "type": "boolean" },
+          "observed_at": { "type": "string" }
+        },
+        "additionalProperties": false
+      },
+      "valid": [
+        {
+          "schema_version": 1,
+          "event": "PostToolUse",
+          "tool_name": "run_subagent",
+          "profile": "worker-1",
+          "is_background": false,
+          "success": true,
+          "observed_at": "2024-01-01T00:00:00+00:00"
+        }
+      ],
+      "invalid": [
+        {
+          "schema_version": true,
+          "event": "PostToolUse",
+          "tool_name": "run_subagent",
+          "profile": "worker-1",
+          "is_background": false,
+          "success": true,
+          "observed_at": "2024-01-01T00:00:00+00:00"
+        },
+        {
+          "schema_version": 1,
+          "event": "PostToolUse",
+          "tool_name": "run_subagent",
+          "profile": "worker-1",
+          "is_background": false,
+          "success": true,
+          "observed_at": "2024-01-01T00:00:00+00:00",
+          "extra": "field"
+        },
+        {
+          "schema_version": 1,
+          "event": "PostToolUse",
+          "tool_name": "run_subagent",
+          "is_background": false,
+          "success": true,
+          "observed_at": "2024-01-01T00:00:00+00:00"
+        }
+      ]
+    }
+  ]
+}
