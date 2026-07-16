@@ -86,3 +86,71 @@ jobs:
         with:
           name: dist
           path: dist/
+
+  rust:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@1.83
+        with:
+          components: rustfmt, clippy
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Rust fmt
+        working-directory: experiments/native-launcher-rust
+        run: cargo fmt --check
+
+      - name: Rust clippy
+        working-directory: experiments/native-launcher-rust
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+      - name: Rust test
+        working-directory: experiments/native-launcher-rust
+        run: cargo test --all-targets --all-features
+
+      - name: Rust build release
+        working-directory: experiments/native-launcher-rust
+        run: cargo build --release
+
+      - name: Rust build companion release
+        working-directory: experiments/native-launcher-rust
+        run: cargo build --release --features companion
+
+      - name: Shared contract (normal)
+        run: |
+          set -e
+          base="$RUNNER_TEMP/contract-normal"
+          rm -rf "$base" && mkdir -p "$base"
+          python3 experiments/native-launcher-testkit/run-contract.py \
+            --candidate experiments/native-launcher-rust/target/release/goal-devin-dev \
+            --devin-bin experiments/native-launcher-testkit/fake-devin \
+            --model swe-1-7 \
+            --permission-mode accept-edits \
+            --contract-dir experiments/native-launcher-testkit \
+            --canary-fixture experiments/native-launcher-testkit/fixtures/canary \
+            --runtime-root "$base/runtime" \
+            --base-dir "$base" \
+            --keep-artifacts
+
+      - name: Shared contract (existing hooks)
+        run: |
+          set -e
+          base="$RUNNER_TEMP/contract-existing"
+          rm -rf "$base" && mkdir -p "$base"
+          python3 experiments/native-launcher-testkit/run-contract.py \
+            --candidate experiments/native-launcher-rust/target/release/goal-devin-dev \
+            --devin-bin experiments/native-launcher-testkit/fake-devin \
+            --model swe-1-7 \
+            --permission-mode accept-edits \
+            --contract-dir experiments/native-launcher-testkit \
+            --canary-fixture experiments/native-launcher-testkit/fixtures/canary \
+            --existing-hooks experiments/native-launcher-testkit/fixtures/existing-hooks/.devin/hooks.v1.json \
+            --runtime-root "$base/runtime" \
+            --base-dir "$base" \
+            --keep-artifacts
