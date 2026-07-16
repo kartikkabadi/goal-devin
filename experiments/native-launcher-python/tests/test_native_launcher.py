@@ -613,7 +613,10 @@ def test_exec_replacement_is_rejected():
         process_overlap=True,
     )
     assert rc != 0
-    assert any("distinct" in e.lower() or "supervisor.pid" in e.lower() for e in errors)
+    assert any(
+        "duplicate" in e.lower() or "distinct" in e.lower() or "supervisor.pid" in e.lower()
+        for e in errors
+    )
 
 
 def test_outside_write_candidate_is_rejected():
@@ -1600,3 +1603,104 @@ def test_supplied_canary_created_and_removed():
     finally:
         monkeypatch.undo()
         shutil.rmtree(runtime_root, ignore_errors=True)
+
+
+def test_vacuous_limits_schema_rejected_before_runtime():
+    """A limits.schema.json of {} must be rejected as an invalid closed schema."""
+    bad_contract = Path(tempfile.mkdtemp(prefix="goal-devin-r1a1-vacuous-limits-schema-"))
+    (bad_contract / "expected").mkdir(parents=True)
+    for name in ("event.schema.json", "summary.schema.json", "manifest.schema.json"):
+        shutil.copyfile(TESTKIT / "expected" / name, bad_contract / "expected" / name)
+    (bad_contract / "expected" / "limits.schema.json").write_text("{}", encoding="utf-8")
+    shutil.copyfile(TESTKIT / "limits.json", bad_contract / "limits.json")
+    try:
+        rc, errors, _ = _run_contract(contract_dir=bad_contract)
+        assert rc != 0
+        assert any("limits schema" in e.lower() or "schema" in e.lower() for e in errors), errors
+    finally:
+        shutil.rmtree(bad_contract, ignore_errors=True)
+
+
+def test_minimal_impossible_limits_rejected_before_runtime():
+    """Limits that are schema-valid but cannot physically fit a valid event/summary
+    must be rejected before the candidate runs."""
+    bad_contract = Path(tempfile.mkdtemp(prefix="goal-devin-r1a1-impossible-limits-"))
+    (bad_contract / "expected").mkdir(parents=True)
+    for name in (
+        "event.schema.json",
+        "summary.schema.json",
+        "manifest.schema.json",
+        "limits.schema.json",
+    ):
+        shutil.copyfile(TESTKIT / "expected" / name, bad_contract / "expected" / name)
+    impossible = {
+        key: 1 for key in json.loads((TESTKIT / "limits.json").read_text(encoding="utf-8"))
+    }
+    (bad_contract / "limits.json").write_text(json.dumps(impossible), encoding="utf-8")
+    try:
+        rc, errors, _ = _run_contract(contract_dir=bad_contract)
+        assert rc != 0
+        assert any(
+            "max_event_json_bytes" in e.lower() or "max_summary_size_bytes" in e.lower()
+            for e in errors
+        ), errors
+    finally:
+        shutil.rmtree(bad_contract, ignore_errors=True)
+
+
+def test_no_event_candidate_rejected():
+    """A candidate that forges a valid-looking summary with total_events:1 but never
+    publishes an event must be rejected.
+    """
+    rc, errors, _ = _run_contract(
+        candidate=TESTKIT / "fixtures" / "no-event-candidate.py",
+    )
+    assert rc != 0
+    assert any("event" in e.lower() for e in errors), errors
+
+
+def test_canary_root_unowned_file_rejected():
+    """A candidate that leaves a new unowned file at the canary root must be rejected."""
+    rc, errors, _ = _run_contract(
+        candidate=TESTKIT / "fixtures" / "canary-root-unowned-file-candidate.py",
+    )
+    assert rc != 0
+    assert any("unowned" in e.lower() or "canary" in e.lower() for e in errors), errors
+
+
+def test_canary_corrupt_then_exit_rejected():
+    """A candidate that mutates the canary and exits nonzero before producing a manifest
+    must still have its canary integrity violation caught.
+    """
+    rc, errors, _ = _run_contract(
+        candidate=TESTKIT / "fixtures" / "canary-corrupt-then-exit-candidate.py",
+    )
+    assert rc != 0
+    assert any(
+        "unowned" in e.lower() or "canary" in e.lower() or "exited" in e.lower() for e in errors
+    ), errors
+
+
+def test_sentinel_pid_rejected_without_killing_sentinel():
+    """A bogus child PID pointing at an unrelated process must be rejected and the
+    runner must not signal that process.
+    """
+    sentinel = subprocess.Popen(["sleep", "60"], start_new_session=True)
+    try:
+        rc, errors, _ = _run_contract(
+            candidate=TESTKIT / "fixtures" / "sentinel-pid-candidate.py",
+            process_overlap=True,
+            extra_env={"GOAL_DEVIN_SENTINEL_PID": str(sentinel.pid)},
+        )
+        assert rc != 0
+        assert any(
+            "process tree" in e.lower() or "not in candidate" in e.lower() for e in errors
+        ), errors
+        assert sentinel.poll() is None, "sentinel was killed"
+    finally:
+        sentinel.terminate()
+        try:
+            sentinel.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            sentinel.kill()
+            sentinel.wait()

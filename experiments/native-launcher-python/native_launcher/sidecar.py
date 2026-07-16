@@ -137,12 +137,24 @@ class Sidecar:
         if _size(text) > limits.max_summary_size_bytes:
             # Fallback to compact JSON for the smallest possible valid shape.
             text = json.dumps(summary, separators=(",", ":"))
+            if _size(text) > limits.max_summary_size_bytes:
+                raise RuntimeError(
+                    f"summary cannot fit within max_summary_size_bytes "
+                    f"({limits.max_summary_size_bytes})"
+                )
         atomic_write(self.summary_path, text)
 
     def _add_tool(self, tool: str | None) -> None:
         if not isinstance(tool, str):
             return
-        if tool not in self.tools and len(self.tools) >= self.limits.max_distinct_tools:
+        if tool == "run_subagent":
+            if tool not in self.tools and len(self.tools) >= self.limits.max_distinct_tools:
+                # Reserve a slot for the canonical run_subagent observation.
+                for existing in list(self.tools.keys()):
+                    if existing != "run_subagent":
+                        del self.tools[existing]
+                        break
+        elif tool not in self.tools and len(self.tools) >= self.limits.max_distinct_tools:
             # Already at the distinct-tool limit; drop new tools fail-open.
             return
         self.tools[tool] = self.tools.get(tool, 0) + 1
@@ -208,6 +220,16 @@ class Sidecar:
         tool = event.get("tool_name")
         profile = event.get("profile")
         self._add_tool(tool)
+        if tool == "run_subagent" and isinstance(profile, str):
+            if (
+                profile not in self.profiles
+                and len(self.profiles) >= self.limits.max_distinct_profiles
+            ):
+                # Reserve a slot for the worker profile observed through run_subagent.
+                for existing in list(self.profiles.keys()):
+                    if existing != profile:
+                        del self.profiles[existing]
+                        break
         self._add_profile(profile)
         self.last_event = {
             "tool_name": tool,

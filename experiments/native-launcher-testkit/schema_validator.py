@@ -80,7 +80,41 @@ def _validate(value: Any, schema: Any, path: str, errors: list[str]) -> None:
             _validate(item, schema["items"], f"{path}[{i}]", errors)
 
 
+_SCHEMA_KEYWORDS = {
+    "type",
+    "enum",
+    "const",
+    "properties",
+    "required",
+    "additionalProperties",
+    "items",
+    "minimum",
+    "maximum",
+    "exclusiveMinimum",
+    "exclusiveMaximum",
+    "minLength",
+    "maxLength",
+    "multipleOf",
+    "pattern",
+    "uniqueItems",
+    "minItems",
+    "maxItems",
+}
+
+
+def _schema_is_valid(schema: Any) -> bool:
+    if not isinstance(schema, dict):
+        return False
+    if not schema:
+        return False
+    if any(key in _SCHEMA_KEYWORDS for key in schema):
+        return True
+    return False
+
+
 def validate(value: Any, schema: Any) -> list[str]:
+    if not _schema_is_valid(schema):
+        return ["schema is not a valid JSON Schema object"]
     errors: list[str] = []
     _validate(value, schema, "$", errors)
     return errors
