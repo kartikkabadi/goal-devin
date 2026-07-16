@@ -97,9 +97,9 @@ def load_limits(
 ) -> Limits:
     """Load limits from *path* or return the default set.
 
-    If *required* is true, a missing or invalid limits file raises an exception.
-    If *schema_path* is provided, the loaded data is validated against the schema
-    and cross-field constraints.
+    A present, valid, closed ``expected/limits.schema.json`` is required whenever
+    a limits file is actually loaded.  If *required* is true, a missing limits
+    file or a missing/invalid schema raises an exception.
     """
     if path is None or not path.is_file():
         if required:
@@ -109,35 +109,29 @@ def load_limits(
     try:
         raw = path.read_bytes()
     except OSError as exc:
-        if required:
-            raise ValueError(f"cannot read limits file {path}: {exc}") from exc
-        return Limits()
+        raise ValueError(f"cannot read limits file {path}: {exc}") from exc
 
     try:
         data = json.loads(raw.decode("utf-8"))
     except (json.JSONDecodeError, UnicodeDecodeError) as exc:
-        if required:
-            raise ValueError(f"limits file is not valid JSON: {exc}") from exc
-        return Limits()
+        raise ValueError(f"limits file is not valid JSON: {exc}") from exc
 
     schema: dict[str, Any] | None = None
     if schema_path is not None and schema_path.is_file():
         try:
-            schema = json.loads(schema_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            pass
-
-    if required or schema is not None:
-        validate_limits(data, schema, label=str(path))
-    else:
-        # Even without a schema, run cross-field checks so malformed defaults do
-        # not silently disable caps (e.g. max_recent_event_ids: 0).
+            schema_text = schema_path.read_text(encoding="utf-8")
+        except OSError as exc:
+            raise ValueError(f"cannot read limits schema {schema_path}: {exc}") from exc
         try:
-            validate_limits(data, None, label=str(path))
-        except ValueError:
-            if required:
-                raise
-            return Limits()
+            schema = json.loads(schema_text)
+        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+            raise ValueError(f"limits schema is not valid JSON: {exc}") from exc
+    elif schema_path is not None:
+        raise FileNotFoundError(f"limits schema required but missing: {schema_path}")
+    elif required:
+        raise FileNotFoundError("limits schema required but not provided")
+
+    validate_limits(data, schema, label=str(path))
 
     filtered = {k: v for k, v in data.items() if k in Limits.__dataclass_fields__}
     return Limits(**filtered)

@@ -166,6 +166,8 @@ class Supervisor:
         self.devin_returncode: int | None = None
         self.original_hooks_bytes: bytes | None = None
         self.original_hooks_mode: int | None = None
+        self.existing_hooks_bytes: bytes | None = None
+        self.existing_hooks_mode: int | None = None
         self.hook_owned: bool = False
         self.lifecycle_path: Path | None = None
         self.owned_dirs: list[Path] = []
@@ -203,6 +205,12 @@ class Supervisor:
         shutil.copyfile(limits_src, limits_dst)
         os.chmod(limits_dst, 0o600)
 
+        limits_schema_src = self.contract_dir / "expected" / "limits.schema.json"
+        limits_schema_dst = self.runtime_dir / "limits.schema.json"
+        if limits_schema_src.exists():
+            shutil.copyfile(limits_schema_src, limits_schema_dst)
+            os.chmod(limits_schema_dst, 0o600)
+
     def _install_hook_script(self) -> list[str]:
         hook_src = Path(__file__).resolve().parent / "hook.py"
         hook_dst = self.runtime_dir / "hook"
@@ -212,33 +220,21 @@ class Supervisor:
         return [sys.executable, str(hook_dst), str(self.events_dir)]
 
     def _install_canary_hook(self, hook_command: list[str]) -> None:
-        devin_dir = self.canary / ".devin"
-        hooks_file = devin_dir / "hooks.v1.json"
-        if has_symlink_component(self.canary, devin_dir):
-            raise ValueError("canary .devin path contains a symlink")
+        hooks_file = self.canary / ".devin" / "hooks.v1.json"
         if has_symlink_component(self.canary, hooks_file):
             raise ValueError("canary hooks.v1.json path contains a symlink")
 
-        # Snapshot existence before any mutation.  The temporary project hook is
-        # only marked as owned when it did not exist before this run.
-        hook_file_existed = hooks_file.exists()
-        if hook_file_existed:
-            self.original_hooks_bytes = hooks_file.read_bytes()
-            self.original_hooks_mode = stat.S_IMODE(hooks_file.stat().st_mode)
+        # If a hook file already existed in the canary (or was installed from an
+        # --existing-hooks source), it is restored after the run.  Otherwise the
+        # file is run-created and must be removed during cleanup.
+        if self.original_hooks_bytes is not None:
             existing_config = _validate_existing_hooks_data(
                 self.original_hooks_bytes, label=str(hooks_file)
             )
+            self.hook_owned = False
         else:
-            self.original_hooks_bytes = None
-            self.original_hooks_mode = None
             existing_config = {}
-
-        self.hook_owned = not hook_file_existed
-
-        # Only create/chmod .devin if it does not already exist; a
-        # pre-existing .devin directory belongs to the user/project.
-        created_devin = ensure_private_dir(devin_dir, mode=0o700, exist_ok=True)
-        self.owned_dirs.extend(created_devin)
+            self.hook_owned = True
 
         command_str = " ".join(shlex.quote(str(part)) for part in hook_command)
         goal_devin_entry = {
@@ -281,43 +277,44 @@ class Supervisor:
             if has_symlink_component(self.runtime_root, self.canary_arg):
                 raise ValueError("canary path contains a symlink")
             self.canary = self.canary_arg
-            self.canary.mkdir(parents=True, exist_ok=True)
-            self.canary_created = False
+            # A caller-supplied canary that does not yet exist is created by this
+            # run and must be cleaned up like a generated canary.
+            canary_existed = self.canary.exists()
+            created = ensure_private_dir(self.canary, mode=0o700, exist_ok=True)
+            self.owned_dirs.extend(created)
+            self.canary_created = not canary_existed or bool(created)
         else:
             self.canary = self.runtime_dir / "canary"
             created = ensure_private_dir(self.canary, mode=0o700)
             self.owned_dirs.extend(created)
             self.canary_created = True
 
+        devin_dir = self.canary / ".devin"
+        if has_symlink_component(self.canary, devin_dir):
+            raise ValueError("canary .devin path contains a symlink")
+        created_devin = ensure_private_dir(devin_dir, mode=0o700, exist_ok=True)
+        self.owned_dirs.extend(created_devin)
+
+        canary_hooks_file = devin_dir / "hooks.v1.json"
+        if canary_hooks_file.exists():
+            if has_symlink_component(self.canary, canary_hooks_file):
+                raise ValueError("canary hooks.v1.json path contains a symlink")
+            self.original_hooks_bytes = canary_hooks_file.read_bytes()
+            self.original_hooks_mode = stat.S_IMODE(canary_hooks_file.stat().st_mode)
+            _validate_existing_hooks_data(self.original_hooks_bytes, label=str(canary_hooks_file))
+            self.hook_owned = False
+
         if self.existing_hooks:
             if not self.existing_hooks.exists():
                 raise FileNotFoundError(f"existing-hooks fixture not found: {self.existing_hooks}")
-            # Validate the source bytes before any canary mutation.
             source_bytes = self.existing_hooks.read_bytes()
+            source_mode = stat.S_IMODE(self.existing_hooks.stat().st_mode)
             _validate_existing_hooks_data(source_bytes, label=str(self.existing_hooks))
-
-            devin_dir = self.canary / ".devin"
-            if has_symlink_component(self.canary, devin_dir):
-                raise ValueError("canary .devin path contains a symlink")
-            dst = devin_dir / "hooks.v1.json"
-            if has_symlink_component(self.canary, dst):
-                raise ValueError("canary hooks.v1.json path contains a symlink")
-
-            created_devin = ensure_private_dir(devin_dir, mode=0o700, exist_ok=True)
-            self.owned_dirs.extend(created_devin)
-            shutil.copyfile(self.existing_hooks, dst)
-            os.chmod(dst, stat.S_IMODE(self.existing_hooks.stat().st_mode))
-        else:
-            # Pre-existing canary hooks must be validated before any profile or
-            # sidecar work is started, and their pre-mutation state captured.
-            hooks_file = self.canary / ".devin" / "hooks.v1.json"
-            if hooks_file.exists():
-                if has_symlink_component(self.canary, hooks_file):
-                    raise ValueError("canary hooks.v1.json path contains a symlink")
-                self.original_hooks_bytes = hooks_file.read_bytes()
-                self.original_hooks_mode = stat.S_IMODE(hooks_file.stat().st_mode)
-                _validate_existing_hooks_data(self.original_hooks_bytes, label=str(hooks_file))
-                self.hook_owned = False
+            shutil.copyfile(self.existing_hooks, canary_hooks_file)
+            os.chmod(canary_hooks_file, source_mode)
+            self.original_hooks_bytes = source_bytes
+            self.original_hooks_mode = source_mode
+            self.hook_owned = False
 
     def _start_sidecar(self) -> None:
         candidate_dir = _candidate_dir()

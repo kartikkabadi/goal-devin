@@ -47,7 +47,8 @@ class Sidecar:
         self.summary_path = self.runtime_dir / "summary.json"
         self.schema_path = self.runtime_dir / "event.schema.json"
         limits_path = self.runtime_dir / "limits.json"
-        self.limits = load_limits(limits_path)
+        limits_schema_path = self.runtime_dir / "limits.schema.json"
+        self.limits = load_limits(limits_path, limits_schema_path, required=True)
         lifecycle_path = os.environ.get("GOAL_DEVIN_LIFECYCLE_LOG")
         self.lifecycle_path = Path(lifecycle_path) if lifecycle_path else None
         self.consumed: set[str] = set()
@@ -101,7 +102,7 @@ class Sidecar:
     def _update_summary(self) -> None:
         limits = self.limits
         recent_ids = self.consumed_order[-limits.max_recent_event_ids :]
-        summary = {
+        summary: dict[str, Any] = {
             "schema_version": 1,
             "run_id": self.runtime_dir.name,
             "total_events": self.total_events,
@@ -110,13 +111,32 @@ class Sidecar:
             "profiles": self.profiles,
             "last_event": self.last_event,
         }
-        text = json.dumps(summary, indent=2)
-        # Final safety guard: if the summary still exceeds the bound, drop the
-        # recent id list and try once more.  This should not happen with the
-        # earlier caps, but it keeps the sidecar fail-open.
-        if len(text.encode("utf-8")) > limits.max_summary_size_bytes:
+
+        # Iteratively trim bounded fields until the serialized summary fits inside
+        # max_summary_size_bytes.  The limits file is required to allow a minimal
+        # summary, but this loop is the final fail-open guard against any path.
+        def _serialize() -> str:
+            return json.dumps(summary, indent=2)
+
+        def _size(text: str) -> int:
+            return len(text.encode("utf-8"))
+
+        text = _serialize()
+        if _size(text) > limits.max_summary_size_bytes:
             summary["consumed_event_ids"] = []
-            text = json.dumps(summary, indent=2)
+            text = _serialize()
+        if _size(text) > limits.max_summary_size_bytes:
+            summary["tools"] = {}
+            text = _serialize()
+        if _size(text) > limits.max_summary_size_bytes:
+            summary["profiles"] = {}
+            text = _serialize()
+        if _size(text) > limits.max_summary_size_bytes:
+            summary["last_event"] = None
+            text = _serialize()
+        if _size(text) > limits.max_summary_size_bytes:
+            # Fallback to compact JSON for the smallest possible valid shape.
+            text = json.dumps(summary, separators=(",", ":"))
         atomic_write(self.summary_path, text)
 
     def _add_tool(self, tool: str | None) -> None:

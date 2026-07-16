@@ -136,6 +136,16 @@ def main() -> None:
         limits_dst.write_text("{}", encoding="utf-8")
     os.chmod(limits_dst, 0o600)
 
+    limits_schema_src = Path(args.contract_dir).resolve() / "expected" / "limits.schema.json"
+    limits_schema_dst = run_dir / "limits.schema.json"
+    if limits_schema_src.exists():
+        limits_schema_dst.write_text(
+            limits_schema_src.read_text(encoding="utf-8"), encoding="utf-8"
+        )
+    else:
+        limits_schema_dst.write_text("{}", encoding="utf-8")
+    os.chmod(limits_schema_dst, 0o600)
+
     for name in ("supervisor.pid", "sidecar.pid", "child.pid"):
         (run_dir / name).write_text(str(os.getpid()), encoding="utf-8")
         os.chmod(run_dir / name, 0o600)

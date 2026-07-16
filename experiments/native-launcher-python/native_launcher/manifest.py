@@ -46,6 +46,7 @@ def make_manifest(
         str((runtime_dir / "sidecar-ready").resolve()),
         str((runtime_dir / "event.schema.json").resolve()),
         str((runtime_dir / "limits.json").resolve()),
+        str((runtime_dir / "limits.schema.json").resolve()),
         str(summary_path.resolve()),
         str((runtime_dir / "fake-devin.record.json").resolve()),
         str(profile_path.resolve()),

@@ -230,11 +230,12 @@ def _load_contract_limits(contract_dir: Path) -> dict[str, int]:
     schema_path = contract_dir / "expected" / "limits.schema.json"
     if not limits_path.exists():
         raise RuntimeError(f"limits.json missing in contract dir: {limits_path}")
+    if not schema_path.exists():
+        raise RuntimeError(f"limits.schema.json missing in contract dir: {schema_path}")
     limits = load_json(limits_path)
-    if schema_path.exists():
-        errors = schema_validator.validate_file(limits, schema_path)
-        if errors:
-            raise RuntimeError(f"limits.json invalid against schema: {errors}")
+    errors = schema_validator.validate_file(limits, schema_path)
+    if errors:
+        raise RuntimeError(f"limits.json invalid against schema: {errors}")
     required = {
         "max_tool_name_length",
         "max_profile_length",
@@ -381,6 +382,10 @@ def _find_run_dir_or_cleanup(
         run_dir = find_run_dir(runtime_root, timeout=0.2)
         if run_dir is not None:
             return run_dir
+    # Deadline expired without a run directory: make sure the candidate tree is
+    # reaped before we return.
+    if proc.poll() is None:
+        _kill_process_tree(proc, None)
     return find_run_dir(runtime_root, timeout=0.0)
 
 
@@ -435,6 +440,7 @@ def _run_tty(
         start_new_session=True,
     )
     os.close(slave)
+    returncode = -1
 
     stdout_buf = bytearray()
     stop_event = threading.Event()
@@ -466,18 +472,21 @@ def _run_tty(
     finder_thread.start()
 
     try:
-        returncode = proc.wait(timeout=max(0, deadline - time.monotonic()))
-    except subprocess.TimeoutExpired:
-        _kill_process_tree(proc, run_dir_holder[0])
-        returncode = -1
-
-    stop_event.set()
-    try:
-        os.close(master)
-    except OSError:
-        pass
-    drain_thread.join(timeout=2)
-    finder_thread.join(timeout=0.5)
+        try:
+            returncode = proc.wait(timeout=max(0, deadline - time.monotonic()))
+        except subprocess.TimeoutExpired:
+            _kill_process_tree(proc, run_dir_holder[0])
+            returncode = -1
+    finally:
+        if proc.poll() is None:
+            _kill_process_tree(proc, run_dir_holder[0])
+        stop_event.set()
+        try:
+            os.close(master)
+        except OSError:
+            pass
+        drain_thread.join(timeout=2)
+        finder_thread.join(timeout=0.5)
 
     return proc, returncode, run_dir_holder[0], bytes(stdout_buf), b""
 
@@ -496,14 +505,19 @@ def _run_normal(
         env=env,
         start_new_session=True,
     )
+    run_dir: Path | None = None
     try:
         remaining = deadline - time.monotonic()
         stdout, stderr = proc.communicate(timeout=max(0, remaining))
         returncode = proc.returncode if proc.returncode is not None else -1
     except subprocess.TimeoutExpired:
+        _kill_process_tree(proc, None)
         run_dir = find_run_dir(runtime_root, timeout=0.5)
         _kill_process_tree(proc, run_dir)
         return proc, -1, run_dir, b"", b""
+    finally:
+        if proc.poll() is None:
+            _kill_process_tree(proc, run_dir)
     run_dir = find_run_dir(runtime_root, timeout=0.5)
     return proc, returncode, run_dir, stdout, stderr
 
@@ -522,30 +536,39 @@ def _run_normal_with_overlap(
         env=env,
         start_new_session=True,
     )
-
-    run_dir = _find_run_dir_or_cleanup(proc, runtime_root, deadline)
-    if run_dir is None:
-        remaining = deadline - time.monotonic()
-        stdout, stderr = proc.communicate(timeout=max(0, min(5, remaining)))
-        raise RuntimeError(
-            f"No run directory appeared under {runtime_root}: {stderr.decode(errors='replace')}"
-        )
-
-    _collect_pids(proc.pid, run_dir, deadline)
-    continue_path = run_dir / "continue"
-    continue_path.write_text("go\n", encoding="utf-8")
-    os.chmod(continue_path, 0o600)
+    run_dir: Path | None = None
+    continue_path: Path | None = None
 
     try:
-        remaining = deadline - time.monotonic()
-        stdout, stderr = proc.communicate(timeout=max(0, remaining))
-        returncode = proc.returncode if proc.returncode is not None else -1
-    except subprocess.TimeoutExpired:
-        _kill_process_tree(proc, run_dir)
-        returncode = -1
-        stdout, stderr = b"", b""
+        run_dir = _find_run_dir_or_cleanup(proc, runtime_root, deadline)
+        if run_dir is None:
+            _kill_process_tree(proc, None)
+            try:
+                remaining = deadline - time.monotonic()
+                stdout, stderr = proc.communicate(timeout=max(0, min(5, remaining)))
+            except subprocess.TimeoutExpired:
+                stdout, stderr = b"", b""
+            raise RuntimeError(
+                f"No run directory appeared under {runtime_root}: {stderr.decode(errors='replace')}"
+            )
+
+        _collect_pids(proc.pid, run_dir, deadline)
+        continue_path = run_dir / "continue"
+        continue_path.write_text("go\n", encoding="utf-8")
+        os.chmod(continue_path, 0o600)
+
+        try:
+            remaining = deadline - time.monotonic()
+            stdout, stderr = proc.communicate(timeout=max(0, remaining))
+            returncode = proc.returncode if proc.returncode is not None else -1
+        except subprocess.TimeoutExpired:
+            _kill_process_tree(proc, run_dir)
+            returncode = -1
+            stdout, stderr = b"", b""
     finally:
-        if continue_path.exists():
+        if proc.poll() is None:
+            _kill_process_tree(proc, run_dir)
+        if continue_path is not None and continue_path.exists():
             try:
                 continue_path.unlink()
             except OSError:
@@ -745,8 +768,8 @@ def _check_ownership(
     canary: Path,
     manifest: dict[str, Any],
     canary_fixture: Path | None,
-    existing_hooks_path: Path | None,
-    existing_bytes: bytes | None,
+    preexisting_canary_hook: Path,
+    preexisting_canary_hook_bytes: bytes | None,
     errors: list[str],
 ) -> None:
     """Verify every generated artifact is declared in the manifest and pre-existing
@@ -761,8 +784,8 @@ def _check_ownership(
         for src in _walk_no_follow(canary_fixture):
             rel = src.relative_to(canary_fixture)
             pre_existing.add((canary / rel).resolve())
-    if existing_hooks_path:
-        pre_existing.add((canary / ".devin" / "hooks.v1.json").resolve())
+    if preexisting_canary_hook_bytes is not None:
+        pre_existing.add(preexisting_canary_hook.resolve())
 
     for path in _walk_no_follow(run_dir):
         resolved = path.resolve()
@@ -791,13 +814,73 @@ def _check_ownership(
         errors.append("Generated profile path not declared in manifest")
 
     hooks_path = (canary / ".devin" / "hooks.v1.json").resolve()
-    if existing_bytes is None and hooks_path.is_file():
+    if preexisting_canary_hook_bytes is None and hooks_path.is_file():
         if hooks_path not in owned_paths and hooks_path not in owned_dirs:
             errors.append("Temporary project hook not declared in manifest")
 
     for pre in pre_existing:
         if _is_owned(pre, owned_paths, owned_roots, owned_dirs):
             errors.append(f"Pre-existing/user-owned path marked as owned: {pre}")
+
+
+def _check_canary_cleanup(
+    canary: Path,
+    canary_snapshot: dict[Path, SnapshotEntry],
+    manifest: dict[str, Any],
+    preexisting_canary_hook: Path,
+    preexisting_canary_hook_bytes: bytes | None,
+    errors: list[str],
+) -> None:
+    """Assert generated profile and hook artifacts are removed and any
+    pre-existing canary path (including .devin/hooks.v1.json) is unchanged.
+    """
+    hooks_file = canary / ".devin" / "hooks.v1.json"
+    if preexisting_canary_hook_bytes is not None:
+        if not hooks_file.is_file():
+            errors.append("Pre-existing .devin/hooks.v1.json was removed instead of restored")
+        else:
+            if hooks_file.read_bytes() != preexisting_canary_hook_bytes:
+                errors.append("Pre-existing .devin/hooks.v1.json was not restored byte-for-byte")
+            old = canary_snapshot.get(hooks_file.resolve())
+            if old is not None:
+                current_mode = stat.S_IMODE(hooks_file.lstat().st_mode)
+                if current_mode != old.mode:
+                    errors.append(
+                        f"Pre-existing .devin/hooks.v1.json mode changed: "
+                        f"{oct(old.mode)} -> {oct(current_mode)}"
+                    )
+    else:
+        if hooks_file.is_file():
+            errors.append("Run-created .devin/hooks.v1.json was not removed")
+
+    profile_path_str = manifest.get("profile_path")
+    if profile_path_str:
+        profile_dir = Path(profile_path_str).resolve().parent
+        if profile_dir.is_dir():
+            errors.append(f"Generated profile directory was not removed: {profile_dir}")
+
+    # Every path that existed in the canary before the run must still exist with
+    # the same kind, mode, size, digest, and symlink target.
+    for path, old in canary_snapshot.items():
+        if not path.exists() and not path.is_symlink():
+            errors.append(f"Pre-existing canary path was removed: {path}")
+            continue
+        new = _snapshot_path(path)
+        if new is None:
+            errors.append(f"Cannot stat pre-existing canary path: {path}")
+            continue
+        if (
+            old.kind != new.kind
+            or old.mode != new.mode
+            or old.size != new.size
+            or old.digest != new.digest
+            or old.target != new.target
+        ):
+            errors.append(
+                f"Pre-existing canary path changed: {path} "
+                f"({old.kind} {oct(old.mode)} size={old.size}) -> "
+                f"({new.kind} {oct(new.mode)} size={new.size})"
+            )
 
 
 def _check_file_modes(run_dir: Path, errors: list[str]) -> None:
@@ -815,6 +898,7 @@ def _check_file_modes(run_dir: Path, errors: list[str]) -> None:
         ("summary.json", "summary.json"),
         ("event.schema.json", "event.schema.json"),
         ("limits.json", "limits.json"),
+        ("limits.schema.json", "limits.schema.json"),
         ("fake-devin.record.json", "fake-devin.record.json"),
     ]
     for name, label in files_600:
@@ -944,7 +1028,6 @@ def run_contract(args: argparse.Namespace) -> list[str]:
         return errors
 
     canary_fixture = Path(args.canary_fixture).resolve() if args.canary_fixture else None
-    existing_hooks_path = Path(args.existing_hooks).resolve() if args.existing_hooks else None
 
     canary = runtime_root / "canary"
     if canary_fixture:
@@ -954,13 +1037,16 @@ def run_contract(args: argparse.Namespace) -> list[str]:
     else:
         canary.mkdir(parents=True, exist_ok=True)
 
-    existing_bytes: bytes | None = None
-    if existing_hooks_path:
-        existing_bytes = existing_hooks_path.read_bytes()
-    elif canary_fixture and (canary_fixture / ".devin" / "hooks.v1.json").is_file():
-        existing_bytes = (canary_fixture / ".devin" / "hooks.v1.json").read_bytes()
-
     base_dir_snapshot = _snapshot_base_dir(base_dir)
+    canary_snapshot = _snapshot_base_dir(canary)
+
+    preexisting_canary_hook = canary / ".devin" / "hooks.v1.json"
+    if preexisting_canary_hook.is_file():
+        preexisting_canary_hook_bytes = preexisting_canary_hook.read_bytes()
+    elif args.existing_hooks:
+        preexisting_canary_hook_bytes = Path(args.existing_hooks).resolve().read_bytes()
+    else:
+        preexisting_canary_hook_bytes = None
 
     run_dir: Path | None = None
     returncode = -1
@@ -1040,8 +1126,16 @@ def run_contract(args: argparse.Namespace) -> list[str]:
         canary,
         manifest,
         canary_fixture,
-        existing_hooks_path,
-        existing_bytes,
+        preexisting_canary_hook,
+        preexisting_canary_hook_bytes,
+        errors,
+    )
+    _check_canary_cleanup(
+        canary,
+        canary_snapshot,
+        manifest,
+        preexisting_canary_hook,
+        preexisting_canary_hook_bytes,
         errors,
     )
     _check_spool_bounds(run_dir, limits, errors)

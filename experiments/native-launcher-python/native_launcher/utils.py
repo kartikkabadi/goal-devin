@@ -71,26 +71,20 @@ def ensure_private_dir(path: Path, mode: int = 0o700, exist_ok: bool = False) ->
             break
         current = current.parent
 
-    leaf_existed = False
     for p in reversed(stack):
         if p.exists():
             if not p.is_dir():
                 raise FileExistsError(f"{p} exists and is not a directory")
-            if p == path:
-                if not exist_ok:
-                    raise FileExistsError(f"directory already exists: {path}")
-                leaf_existed = True
+            if p == path and not exist_ok:
+                raise FileExistsError(f"directory already exists: {path}")
             continue
         p.mkdir(mode=mode, exist_ok=False)
         created.append(p)
     for p in created:
         os.chmod(p, mode)
-    if leaf_existed:
-        # Verify the pre-existing leaf has safe permissions.
-        try:
-            os.chmod(path, mode)
-        except OSError:
-            pass
+    # Pre-existing directories are intentionally NOT chmodded; we create missing
+    # directories with the requested mode and preserve any user/project directory
+    # that already existed.
     return created
 
 

@@ -396,6 +396,7 @@ def test_complete_file_modes(contract_pass):
         ("summary.json", 0o600),
         ("event.schema.json", 0o600),
         ("limits.json", 0o600),
+        ("limits.schema.json", 0o600),
         ("fake-devin.record.json", 0o600),
         ("hook", 0o700),
     ]:
@@ -530,6 +531,28 @@ def test_agents_symlink_escape_is_rejected(tmp_path):
     agents.symlink_to(outside)
     profile_dir = agents / "goal-devin-worker-123"
     assert not safe_path_under(canary, profile_dir)
+
+
+def test_ensure_private_dir_creates_with_700_and_preserves_existing_modes(tmp_path):
+    from native_launcher.utils import ensure_private_dir
+
+    # New directories are created with 0o700.
+    new_leaf = tmp_path / "a" / "b" / "c"
+    created = ensure_private_dir(new_leaf, mode=0o700)
+    assert new_leaf.exists()
+    assert stat.S_IMODE(new_leaf.stat().st_mode) == 0o700
+    assert all(stat.S_IMODE(p.stat().st_mode) == 0o700 for p in created)
+
+    # Pre-existing directories keep their original mode and are not in the returned list.
+    existing = tmp_path / "existing"
+    existing.mkdir()
+    os.chmod(existing, 0o755)
+    child = existing / "child"
+    created = ensure_private_dir(child, mode=0o700)
+    assert child.exists()
+    assert stat.S_IMODE(child.stat().st_mode) == 0o700
+    assert stat.S_IMODE(existing.stat().st_mode) == 0o755
+    assert existing not in created
 
 
 def _make_canary_fixture_with_symlink(link_name: str, target: Path) -> Path:
@@ -779,6 +802,9 @@ def test_pre_existing_canary_hooks_and_user_agent_preserved():
     user_dir.mkdir()
     user_agent = user_dir / "AGENT.md"
     user_agent.write_text("---\nname: user-agent\n---\n", encoding="utf-8")
+    original_devin_mode = stat.S_IMODE(devin_dir.stat().st_mode)
+    original_agents_mode = stat.S_IMODE(agents_dir.stat().st_mode)
+    original_user_dir_mode = stat.S_IMODE(user_dir.stat().st_mode)
     hooks_file = devin_dir / "hooks.v1.json"
     hooks_file.write_text(
         json.dumps(
@@ -815,6 +841,16 @@ def test_pre_existing_canary_hooks_and_user_agent_preserved():
         assert (
             canary_out / ".devin" / "agents" / "user-agent" / "AGENT.md"
         ).read_bytes() == original_agent_bytes
+
+        # Pre-existing directory modes are preserved.
+        assert stat.S_IMODE((canary_out / ".devin").stat().st_mode) == original_devin_mode
+        assert (
+            stat.S_IMODE((canary_out / ".devin" / "agents").stat().st_mode) == original_agents_mode
+        )
+        assert (
+            stat.S_IMODE((canary_out / ".devin" / "agents" / "user-agent").stat().st_mode)
+            == original_user_dir_mode
+        )
 
         # Ownership must not claim user/project directories or borrowed files.
         owned_paths = {Path(p).resolve() for p in manifest["owned_paths"]}
@@ -972,6 +1008,7 @@ def test_sidecar_enforces_runtime_limits():
     events_dir = runtime_dir / "events"
     events_dir.mkdir(parents=True)
     shutil.copyfile(TESTKIT / "expected" / "event.schema.json", runtime_dir / "event.schema.json")
+    shutil.copyfile(TESTKIT / "expected" / "limits.schema.json", runtime_dir / "limits.schema.json")
     shutil.copyfile(TESTKIT / "limits.json", runtime_dir / "limits.json")
 
     def make_event(tool_name: str, profile: str, event_id: str) -> dict:
@@ -1118,6 +1155,47 @@ def test_validate_limits_rejects_unknown_fields():
         validate_limits(data, schema)
 
 
+def test_missing_limits_schema_rejected_before_runtime():
+    """A contract directory without limits.schema.json must be rejected before any
+    project/runtime artifacts are created."""
+    bad_contract = Path(tempfile.mkdtemp(prefix="goal-devin-r1a1-missing-limits-schema-"))
+    (bad_contract / "expected").mkdir(parents=True)
+    shutil.copyfile(
+        TESTKIT / "expected" / "event.schema.json", bad_contract / "expected" / "event.schema.json"
+    )
+    shutil.copyfile(
+        TESTKIT / "expected" / "summary.schema.json",
+        bad_contract / "expected" / "summary.schema.json",
+    )
+    shutil.copyfile(
+        TESTKIT / "expected" / "manifest.schema.json",
+        bad_contract / "expected" / "manifest.schema.json",
+    )
+    shutil.copyfile(TESTKIT / "limits.json", bad_contract / "limits.json")
+    try:
+        rc, errors, _ = _run_contract(contract_dir=bad_contract)
+        assert rc != 0
+        assert any("limits.schema" in e.lower() or "limits" in e.lower() for e in errors), errors
+    finally:
+        shutil.rmtree(bad_contract, ignore_errors=True)
+
+
+def test_malformed_limits_schema_rejected_before_runtime():
+    """A contract directory with an invalid limits.schema.json must be rejected."""
+    bad_contract = Path(tempfile.mkdtemp(prefix="goal-devin-r1a1-malformed-limits-schema-"))
+    (bad_contract / "expected").mkdir(parents=True)
+    for name in ("event.schema.json", "summary.schema.json", "manifest.schema.json"):
+        shutil.copyfile(TESTKIT / "expected" / name, bad_contract / "expected" / name)
+    (bad_contract / "expected" / "limits.schema.json").write_text("not json", encoding="utf-8")
+    shutil.copyfile(TESTKIT / "limits.json", bad_contract / "limits.json")
+    try:
+        rc, errors, _ = _run_contract(contract_dir=bad_contract)
+        assert rc != 0
+        assert any("limits.schema" in e.lower() or "schema" in e.lower() for e in errors), errors
+    finally:
+        shutil.rmtree(bad_contract, ignore_errors=True)
+
+
 def test_stress_mode_enforces_all_bounds():
     """The shared black-box stress run must stay within every configured limit."""
     rc, errors, runtime_root = _run_contract(stress=True, keep=True, timeout=120)
@@ -1145,6 +1223,59 @@ def test_stress_mode_enforces_all_bounds():
         shutil.rmtree(runtime_root.parent, ignore_errors=True)
 
 
+def test_summary_size_pressure_trims_bounded_fields():
+    """A schema-valid limits file with a small max_summary_size_bytes forces the
+    sidecar to trim consumed_event_ids, tools, profiles, and finally last_event
+    while keeping the summary within the bound."""
+    pressure_contract = Path(tempfile.mkdtemp(prefix="goal-devin-r1a1-pressure-limits-"))
+    (pressure_contract / "expected").mkdir(parents=True)
+    for name in (
+        "event.schema.json",
+        "summary.schema.json",
+        "manifest.schema.json",
+        "limits.schema.json",
+    ):
+        shutil.copyfile(TESTKIT / "expected" / name, pressure_contract / "expected" / name)
+
+    pressure_limits = {
+        "max_tool_name_length": 20,
+        "max_profile_length": 30,
+        "max_event_value_length": 32,
+        "max_event_json_bytes": 250,
+        "max_total_spool_bytes": 500,
+        "max_retained_event_files": 10,
+        "max_distinct_tools": 5,
+        "max_distinct_profiles": 5,
+        "max_recent_event_ids": 5,
+        "max_summary_size_bytes": 250,
+    }
+    (pressure_contract / "limits.json").write_text(json.dumps(pressure_limits), encoding="utf-8")
+
+    try:
+        rc, errors, runtime_root = _run_contract(
+            contract_dir=pressure_contract, keep=True, timeout=60
+        )
+        assert rc == 0, "\n".join(errors)
+        run_dir = _find_run_dir(runtime_root)
+        assert run_dir
+        summary_path = run_dir / "summary.json"
+        summary = json.loads(summary_path.read_text(encoding="utf-8"))
+        assert summary_path.stat().st_size <= pressure_limits["max_summary_size_bytes"]
+        # The sidecar had to drop at least the last_event to fit the tiny bound.
+        assert summary["last_event"] is None
+        # Bounded maps/arrays that can grow without bound should be empty after trimming.
+        assert summary["tools"] == {}
+        assert summary["profiles"] == {}
+        assert summary["consumed_event_ids"] == []
+        assert summary["total_events"] >= 1
+        schema_path = TESTKIT / "expected" / "summary.schema.json"
+        assert not schema_validator.validate_file(summary, schema_path)
+    finally:
+        shutil.rmtree(pressure_contract, ignore_errors=True)
+        if "runtime_root" in locals():
+            shutil.rmtree(runtime_root.parent, ignore_errors=True)
+
+
 def test_sidecar_rejects_malformed_spool_files():
     """Malformed event files must not crash the sidecar or be rescanned forever."""
     from native_launcher.sidecar import Sidecar
@@ -1153,6 +1284,7 @@ def test_sidecar_rejects_malformed_spool_files():
     events_dir = runtime_dir / "events"
     events_dir.mkdir(parents=True)
     shutil.copyfile(TESTKIT / "expected" / "event.schema.json", runtime_dir / "event.schema.json")
+    shutil.copyfile(TESTKIT / "expected" / "limits.schema.json", runtime_dir / "limits.schema.json")
     shutil.copyfile(TESTKIT / "limits.json", runtime_dir / "limits.json")
 
     try:
@@ -1229,6 +1361,48 @@ def _is_alive(pid: int) -> bool:
     return True
 
 
+def _no_process_with(name: str) -> bool:
+    result = subprocess.run(
+        ["pgrep", "-f", name],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    return result.returncode != 0
+
+
+def test_hang_no_rundir_reaps_process():
+    """A candidate that hangs without creating a run directory must be killed
+    within the timeout and no candidate process may survive."""
+    start = time.monotonic()
+    rc, errors, _ = _run_contract(
+        candidate=TESTKIT / "fixtures" / "hang-no-rundir-candidate.py",
+        timeout=2,
+    )
+    elapsed = time.monotonic() - start
+    assert rc != 0
+    assert elapsed < 8, f"runner did not fail within the timeout bound ({elapsed:.1f}s)"
+    # Give the runner a moment to finish reaping after the timeout return.
+    time.sleep(0.5)
+    assert _no_process_with("hang-no-rundir-candidate.py")
+
+
+def test_overlap_missing_pid_rejected():
+    """A candidate that creates a run directory but never writes PID files must
+    be killed and rejected."""
+    start = time.monotonic()
+    rc, errors, _ = _run_contract(
+        candidate=TESTKIT / "fixtures" / "overlap-missing-pid-candidate.py",
+        process_overlap=True,
+        timeout=2,
+    )
+    elapsed = time.monotonic() - start
+    assert rc != 0
+    assert any("pid" in e.lower() for e in errors), errors
+    assert elapsed < 8, f"runner did not fail within the timeout bound ({elapsed:.1f}s)"
+    time.sleep(0.5)
+    assert _no_process_with("overlap-missing-pid-candidate.py")
+
+
 def test_modify_sentinel_rejected():
     rc, errors, runtime_root = _run_contract(
         candidate=TESTKIT / "fixtures" / "modify-sentinel-candidate.py",
@@ -1251,6 +1425,49 @@ def test_delete_sentinel_rejected():
     try:
         assert rc != 0
         assert any("deleted" in e.lower() for e in errors), errors
+    finally:
+        shutil.rmtree(runtime_root.parent, ignore_errors=True)
+
+
+def test_leave_profile_rejected():
+    rc, errors, runtime_root = _run_contract(
+        candidate=TESTKIT / "fixtures" / "leave-profile-candidate.py",
+        keep=True,
+    )
+    try:
+        assert rc != 0
+        assert any("profile directory was not removed" in e.lower() for e in errors), errors
+    finally:
+        shutil.rmtree(runtime_root.parent, ignore_errors=True)
+
+
+def test_leave_new_hook_rejected():
+    rc, errors, runtime_root = _run_contract(
+        candidate=TESTKIT / "fixtures" / "leave-new-hook-candidate.py",
+        keep=True,
+    )
+    try:
+        assert rc != 0
+        assert any("run-created .devin/hooks.v1.json" in e.lower() for e in errors), errors
+    finally:
+        shutil.rmtree(runtime_root.parent, ignore_errors=True)
+
+
+def test_modify_existing_hook_rejected():
+    original = EXISTING_HOOKS.read_bytes()
+    rc, errors, runtime_root = _run_contract(
+        candidate=TESTKIT / "fixtures" / "modify-existing-hook-candidate.py",
+        existing_hooks=True,
+        keep=True,
+    )
+    try:
+        assert rc != 0
+        assert any(
+            "not restored byte-for-byte" in e.lower() or "changed" in e.lower() for e in errors
+        ), errors
+        canary = runtime_root / "canary"
+        hooks_file = canary / ".devin" / "hooks.v1.json"
+        assert hooks_file.read_bytes() != original
     finally:
         shutil.rmtree(runtime_root.parent, ignore_errors=True)
 
@@ -1342,3 +1559,44 @@ def test_manifest_records_owned_dirs():
         assert (canary / ".devin").resolve() in owned_dirs
     finally:
         shutil.rmtree(runtime_root.parent, ignore_errors=True)
+
+
+def test_supplied_canary_created_and_removed():
+    """A supplied --canary path that does not pre-exist is treated as run-owned
+    and removed after the run."""
+    from native_launcher import supervisor as supervisor_module
+
+    runtime_root = Path(tempfile.mkdtemp(prefix="goal-devin-r1a1-supplied-canary-"))
+    supplied_canary = runtime_root / "my-canary"
+    assert not supplied_canary.exists()
+
+    args = types.SimpleNamespace(
+        model="swe-1-7",
+        permission_mode="accept-edits",
+        devin_bin=str(FAKE_DEVIN),
+        contract_dir=str(TESTKIT),
+        runtime_root=str(runtime_root),
+        canary=str(supplied_canary),
+        existing_hooks=None,
+        keep_canary=False,
+    )
+
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(supervisor_module.Supervisor, "_start_sidecar", lambda self: None)
+    monkeypatch.setattr(
+        supervisor_module.Supervisor,
+        "_run_devin",
+        lambda self: setattr(self, "devin_returncode", 0),
+    )
+    try:
+        supervisor = supervisor_module.Supervisor(args)
+        rc = supervisor.run()
+        assert rc == 0
+        # The supplied canary must be treated as run-created and removed.
+        assert supervisor.canary_created is True
+        owned_dirs = {Path(p).resolve() for p in supervisor.owned_dirs}
+        assert supplied_canary.resolve() in owned_dirs
+        assert not supplied_canary.exists()
+    finally:
+        monkeypatch.undo()
+        shutil.rmtree(runtime_root, ignore_errors=True)
