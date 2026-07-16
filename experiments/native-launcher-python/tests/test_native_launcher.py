@@ -1960,3 +1960,41 @@ def test_delayed_sidecar_pid_reaped_on_timeout():
         assert not _is_alive(sidecar_pid), f"sidecar {sidecar_pid} is still alive after timeout"
     finally:
         shutil.rmtree(runtime_root.parent, ignore_errors=True)
+
+
+def test_canary_preexisting_symlink_preserved():
+    """A harmless pre-existing symlink in the canary fixture must remain unchanged
+    and not be flagged as an unowned new path.
+    """
+    rc, errors, _ = _run_contract()
+    assert rc == 0, "\n".join(errors)
+
+
+def test_canary_new_symlink_to_owned_runtime_rejected():
+    """A candidate that creates a canary symlink pointing to an owned runtime file
+    must be rejected because the symlink entry itself is not declared.
+    """
+    rc, errors, _ = _run_contract(
+        candidate=TESTKIT / "fixtures" / "canary-symlink-to-owned-candidate.py",
+    )
+    assert rc != 0
+    assert any(
+        "symlink" in e.lower()
+        and ("not owned" in e.lower() or "boundary" in e.lower() or "escapes" in e.lower())
+        for e in errors
+    ), errors
+
+
+def test_runtime_broken_symlink_rejected():
+    """A candidate that creates a broken symlink in the runtime directory must be
+    rejected as an unowned entry or as escaping the permitted boundary.
+    """
+    rc, errors, _ = _run_contract(
+        candidate=TESTKIT / "fixtures" / "runtime-broken-symlink-candidate.py",
+    )
+    assert rc != 0
+    assert any(
+        "symlink" in e.lower()
+        and ("not owned" in e.lower() or "boundary" in e.lower() or "escapes" in e.lower())
+        for e in errors
+    ), errors

@@ -277,7 +277,11 @@ def _walk_no_follow(path: Path) -> list[Path]:
     try:
         for child in path.iterdir():
             results.append(child)
-            if child.is_dir() and not child.is_symlink():
+            try:
+                st = child.lstat()
+            except OSError:
+                continue
+            if stat.S_ISDIR(st.st_mode) and not stat.S_ISLNK(st.st_mode):
                 results.extend(_walk_no_follow(child))
     except OSError:
         pass
@@ -289,16 +293,34 @@ def _snapshot_base_dir(base_dir: Path) -> dict[Path, SnapshotEntry]:
     base_abs = base_dir.absolute()
     snapshot[base_abs] = _snapshot_path(base_dir)
     for p in _walk_no_follow(base_dir):
+        # Snapshot entries by their lexical absolute path, not by the resolved symlink target.
         snapshot[p.absolute()] = _snapshot_path(p)
     return snapshot
 
 
 def _is_allowed_path(path: Path, runtime_root: Path) -> bool:
-    """Return True if *path* is inside or is the runtime root."""
+    """Return True if *path* is inside or is the runtime root.
+
+    Uses lexical paths so symlinks are evaluated by their entry location, not their target.
+    """
     try:
-        return path.is_relative_to(runtime_root)
+        return path.absolute().is_relative_to(runtime_root.absolute())
     except (ValueError, TypeError):
         return False
+
+
+def _resolve_symlink_target(link: Path, target: str | None) -> Path | None:
+    """Return the lexical, normalized target path of a symlink, or None."""
+    if target is None:
+        return None
+    if target.startswith("/"):
+        resolved = Path(os.path.normpath(target))
+    else:
+        resolved = Path(os.path.normpath(str(link.parent.absolute() / target)))
+    try:
+        return resolved.absolute()
+    except OSError:
+        return resolved
 
 
 def _load_contract_limits(contract_dir: Path) -> dict[str, int]:
@@ -512,58 +534,188 @@ def _union_pids(*lists: list[int] | None) -> list[int]:
     return result
 
 
+def _pid_start_time(pid: int) -> str | None:
+    """Return a stable start-time identity string for *pid*, or None.
+
+    On Linux this is the ``starttime`` field from ``/proc/<pid>/stat``. On other
+    Unix systems the ``ps lstart`` output is used. Two readings of the same
+    process should return the same string; a reused PID will differ.
+    """
+    if sys.platform == "linux":
+        try:
+            text = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8", errors="replace")
+            # The command name is inside parentheses and may itself contain
+            # parentheses or spaces, so split from the last ')'.
+            after = text.rsplit(")", 1)[-1].split()
+            if len(after) > 19:
+                return after[19]
+        except (OSError, ValueError, IndexError):
+            pass
+    try:
+        result = subprocess.run(
+            ["ps", "-o", "lstart=", "-p", str(pid)],
+            capture_output=True,
+            text=True,
+            timeout=0.5,
+        )
+        if result.returncode == 0:
+            return result.stdout.strip()
+    except (OSError, subprocess.TimeoutExpired, ValueError, FileNotFoundError):
+        pass
+    return None
+
+
+def _descendant_pids(root_pid: int) -> list[int]:
+    """Return all descendant PIDs of *root_pid* visible to this process."""
+    parent_map: dict[int, int] = {}
+    if sys.platform == "linux":
+        try:
+            for pdir in Path("/proc").iterdir():
+                if not pdir.name.isdigit():
+                    continue
+                try:
+                    pid = int(pdir.name)
+                except ValueError:
+                    continue
+                if pid == root_pid:
+                    continue
+                status = pdir / "status"
+                if not status.is_file():
+                    continue
+                try:
+                    for line in status.read_text(encoding="utf-8", errors="replace").splitlines():
+                        if line.startswith("PPid:"):
+                            parent_map[pid] = int(line.split()[1])
+                            break
+                except (OSError, ValueError):
+                    continue
+        except OSError:
+            pass
+    else:
+        try:
+            result = subprocess.run(
+                ["ps", "-ax", "-o", "pid=,ppid="],
+                capture_output=True,
+                text=True,
+                timeout=2,
+            )
+            if result.returncode == 0:
+                for line in result.stdout.splitlines():
+                    parts = line.strip().split()
+                    if len(parts) >= 2:
+                        try:
+                            pid = int(parts[0])
+                            ppid = int(parts[1])
+                            if pid != root_pid:
+                                parent_map[pid] = ppid
+                        except ValueError:
+                            continue
+        except (OSError, subprocess.TimeoutExpired, ValueError, FileNotFoundError):
+            pass
+
+    descendants: set[int] = set()
+    queue = [root_pid]
+    while queue:
+        current = queue.pop(0)
+        for pid, ppid in list(parent_map.items()):
+            if ppid == current and pid not in descendants:
+                descendants.add(pid)
+                queue.append(pid)
+    return sorted(descendants)
+
+
 def _kill_process_tree(
     proc: subprocess.Popen,
     run_dir: Path | None,
     valid_pids: list[int] | None = None,
 ) -> None:
-    """Reap the candidate process group and any recorded sidecar/child pids."""
-    try:
-        os.killpg(proc.pid, signal.SIGTERM)
-    except (OSError, ProcessLookupError):
-        pass
-    try:
-        proc.wait(timeout=2)
-    except subprocess.TimeoutExpired:
+    """Reap the candidate process tree using stable process identities.
+
+    1. Freeze all descendants (SIGSTOP) so no new processes/PID files can appear.
+    2. Collect PIDs from *valid_pids*, from PID files, and from OS descendants.
+    3. Capture and re-validate start-time identity right before signalling each PID.
+    4. SIGTERM then SIGKILL surviving PIDs and the root process group.
+    """
+    root_pid = proc.pid
+    if proc.poll() is not None and not valid_pids:
+        return
+
+    # Freeze the candidate and every visible descendant so the set of PIDs and
+    # PID files cannot grow during the final discovery phase.
+    for pid in [root_pid] + _descendant_pids(root_pid):
+        if pid == os.getpid():
+            continue
         try:
-            os.killpg(proc.pid, signal.SIGKILL)
+            os.kill(pid, signal.SIGSTOP)
         except (OSError, ProcessLookupError):
             pass
-        try:
-            proc.wait(timeout=2)
-        except subprocess.TimeoutExpired:
-            pass
 
-    pids: list[int] = []
-    if valid_pids is not None:
-        pids = list(valid_pids)
-    elif run_dir is not None and proc.poll() is None:
-        # Re-read PID files only while the candidate is still alive so we can
-        # verify ancestry/process-group membership against a known root.
+    discovered: set[int] = set()
+    if valid_pids:
+        discovered.update(valid_pids)
+    if run_dir is not None and proc.poll() is None:
         for name in ("supervisor.pid", "sidecar.pid", "child.pid"):
             pid_path = run_dir / name
             if not pid_path.exists():
                 continue
             try:
                 pid = int(pid_path.read_text(encoding="utf-8").strip().split()[0])
-            except (OSError, ProcessLookupError, ValueError):
+            except (OSError, ValueError):
                 continue
-            if _pid_is_in_tree(pid, proc.pid):
-                pids.append(pid)
+            if _pid_is_in_tree(pid, root_pid):
+                discovered.add(pid)
 
-    for pid in pids:
+    # OS-level descendants of the frozen tree may include processes that have not
+    # yet written their PID files (for example a delayed sidecar).
+    for pid in _descendant_pids(root_pid):
+        if pid == os.getpid():
+            continue
+        if _pid_is_in_tree(pid, root_pid) and _is_process_alive(pid):
+            discovered.add(pid)
+
+    # Capture stable identities after the freeze but before the kill window.
+    identities: dict[int, str] = {}
+    for pid in discovered:
+        st = _pid_start_time(pid)
+        if st is not None:
+            identities[pid] = st
+
+    for pid in discovered:
+        if pid == os.getpid():
+            continue
         if not _is_process_alive(pid):
+            continue
+        if not _pid_is_in_tree(pid, root_pid):
+            continue
+        current = _pid_start_time(pid)
+        if current is None or identities.get(pid) != current:
+            # PID was reused or identity cannot be re-proven; do not signal it.
             continue
         try:
             os.kill(pid, signal.SIGTERM)
         except (OSError, ProcessLookupError):
             continue
-        time.sleep(0.1)
+        time.sleep(0.05)
         if _is_process_alive(pid):
             try:
                 os.kill(pid, signal.SIGKILL)
             except (OSError, ProcessLookupError):
                 pass
+
+    # Ensure the root process group is terminated.
+    for pid in [root_pid] + list(discovered):
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except (OSError, ProcessLookupError):
+            pass
+    try:
+        os.killpg(root_pid, signal.SIGKILL)
+    except (OSError, ProcessLookupError):
+        pass
+    try:
+        proc.wait(timeout=2)
+    except subprocess.TimeoutExpired:
+        pass
 
     if run_dir is not None:
         continue_path = run_dir / "continue"
@@ -752,11 +904,6 @@ def _run_tty(
         try:
             returncode = proc.wait(timeout=max(0, deadline - time.monotonic()))
         except subprocess.TimeoutExpired:
-            if run_dir_holder[0] is not None:
-                # One final synchronous discovery immediately before killing, in
-                # case a detached sidecar wrote its PID after the finder snapshot.
-                discovered = _discover_pids(proc.pid, run_dir_holder[0], time.monotonic() + 0.5)
-                valid_pids = _union_pids(valid_pids, discovered)
             _kill_process_tree(proc, run_dir_holder[0], valid_pids)
             returncode = -1
     finally:
@@ -790,7 +937,6 @@ def _run_normal(
         start_new_session=True,
     )
     run_dir: Path | None = None
-    valid_pids: list[int] | None = None
     stop_event = threading.Event()
     run_dir_holder: list[Path | None] = [None]
     pids_holder: list[list[int] | None] = [None]
@@ -814,20 +960,16 @@ def _run_normal(
         stdout, stderr = proc.communicate(timeout=max(0, remaining))
         returncode = proc.returncode if proc.returncode is not None else -1
     except subprocess.TimeoutExpired:
-        run_dir = run_dir_holder[0]
-        valid_pids = pids_holder[0]
-        # Re-discover any PIDs that appeared after the finder snapshot, while the
-        # supervisor is still alive and can be used for ancestry verification.
-        if run_dir is not None:
-            discovered = _discover_pids(proc.pid, run_dir, time.monotonic() + 0.5)
-            valid_pids = _union_pids(valid_pids, discovered)
-        _kill_process_tree(proc, run_dir, valid_pids)
+        # _kill_process_tree freezes the process tree, rediscovers PIDs from PID
+        # files and OS descendants, and re-validates start-time identity before
+        # signalling, so no separate final discovery is needed here.
+        _kill_process_tree(proc, run_dir_holder[0], pids_holder[0])
         returncode = -1
         stdout, stderr = b"", b""
     finally:
         stop_event.set()
         if proc.poll() is None:
-            _kill_process_tree(proc, run_dir_holder[0], valid_pids)
+            _kill_process_tree(proc, run_dir_holder[0], pids_holder[0])
         finder_thread.join(timeout=1)
 
     run_dir = run_dir if run_dir is not None else find_run_dir(runtime_root, timeout=0.5)
@@ -1074,14 +1216,18 @@ def _is_owned(
     owned_roots: list[Path],
     owned_dirs: set[Path],
 ) -> bool:
-    resolved = path.resolve()
-    if resolved in owned_paths:
+    """Return True if the lexical path *path* is declared in the manifest.
+
+    Ownership is by directory-entry path, not by the resolved symlink target.
+    """
+    absolute = path.absolute()
+    if absolute in owned_paths:
         return True
-    if resolved in owned_dirs:
+    if absolute in owned_dirs:
         return True
     for root in owned_roots:
         try:
-            if resolved.is_relative_to(root):
+            if absolute.is_relative_to(root):
                 return True
         except ValueError:
             pass
@@ -1098,114 +1244,65 @@ def _check_ownership(
     errors: list[str],
 ) -> None:
     """Verify every generated artifact is declared in the manifest and pre-existing
-    paths are never marked as owned.  Directories are inventoried as well as files.
+    paths are never marked as owned.  Entries are inventoried lexically using lstat()
+    so symlinks are tested by their own path and target boundary, not by resolution.
     """
-    owned_paths = {Path(p).resolve() for p in manifest.get("owned_paths", [])}
-    owned_roots = [Path(p).resolve() for p in manifest.get("owned_roots", [])]
-    owned_dirs = {Path(p).resolve() for p in manifest.get("owned_dirs", [])}
+    owned_paths = {Path(p).absolute() for p in manifest.get("owned_paths", [])}
+    owned_roots = [Path(p).absolute() for p in manifest.get("owned_roots", [])]
+    owned_dirs = {Path(p).absolute() for p in manifest.get("owned_dirs", [])}
+
+    allowed_run_dir = run_dir.absolute()
+    allowed_canary = canary.absolute()
 
     pre_existing: set[Path] = set()
     if canary_fixture and canary_fixture.is_dir():
         for src in _walk_no_follow(canary_fixture):
             rel = src.relative_to(canary_fixture)
-            pre_existing.add((canary / rel).resolve())
+            pre_existing.add((canary / rel).absolute())
     if preexisting_canary_hook_bytes is not None:
-        pre_existing.add(preexisting_canary_hook.resolve())
+        pre_existing.add(preexisting_canary_hook.absolute())
+
+    def _check_entry(path: Path, allowed_root: Path, label: str) -> None:
+        abs_path = path.absolute()
+        entry = _snapshot_path(path)
+        if entry is None:
+            return
+        if entry.kind == "symlink":
+            target_path = _resolve_symlink_target(path, entry.target)
+            if target_path is not None and not _is_allowed_path(target_path, allowed_root):
+                errors.append(
+                    f"Generated {label} symlink escapes permitted boundary: {abs_path} -> {entry.target}"
+                )
+                return
+            if not _is_owned(abs_path, owned_paths, owned_roots, owned_dirs):
+                errors.append(f"Generated {label} symlink not owned: {abs_path}")
+            return
+        if not _is_owned(abs_path, owned_paths, owned_roots, owned_dirs):
+            errors.append(f"Generated {label} {entry.kind} not owned: {abs_path}")
 
     for path in _walk_no_follow(run_dir):
-        resolved = path.resolve()
-        if path.is_file():
-            if not _is_owned(resolved, owned_paths, owned_roots, owned_dirs):
-                errors.append(f"Generated runtime file not owned: {resolved}")
-        elif path.is_dir():
-            if not _is_owned(resolved, owned_paths, owned_roots, owned_dirs):
-                errors.append(f"Generated runtime directory not owned: {resolved}")
+        _check_entry(path, allowed_run_dir, "runtime")
 
     devin_dir = canary / ".devin"
     if devin_dir.is_dir():
         for path in _walk_no_follow(devin_dir):
-            resolved = path.resolve()
-            if resolved in pre_existing:
+            abs_path = path.absolute()
+            if abs_path in pre_existing:
                 continue
-            if path.is_file():
-                if not _is_owned(resolved, owned_paths, owned_roots, owned_dirs):
-                    errors.append(f"Generated canary file not owned: {resolved}")
-            elif path.is_dir():
-                if not _is_owned(resolved, owned_paths, owned_roots, owned_dirs):
-                    errors.append(f"Generated canary directory not owned: {resolved}")
+            _check_entry(path, allowed_canary, "canary")
 
-    profile_path = Path(manifest["profile_path"]).resolve()
+    profile_path = Path(manifest["profile_path"]).absolute()
     if not _is_owned(profile_path, owned_paths, owned_roots, owned_dirs):
         errors.append("Generated profile path not declared in manifest")
 
-    hooks_path = (canary / ".devin" / "hooks.v1.json").resolve()
+    hooks_path = (canary / ".devin" / "hooks.v1.json").absolute()
     if preexisting_canary_hook_bytes is None and hooks_path.is_file():
-        if hooks_path not in owned_paths and hooks_path not in owned_dirs:
+        if not _is_owned(hooks_path, owned_paths, owned_roots, owned_dirs):
             errors.append("Temporary project hook not declared in manifest")
 
     for pre in pre_existing:
         if _is_owned(pre, owned_paths, owned_roots, owned_dirs):
             errors.append(f"Pre-existing/user-owned path marked as owned: {pre}")
-
-
-def _check_canary_cleanup(
-    canary: Path,
-    canary_snapshot: dict[Path, SnapshotEntry],
-    manifest: dict[str, Any],
-    preexisting_canary_hook: Path,
-    preexisting_canary_hook_bytes: bytes | None,
-    errors: list[str],
-) -> None:
-    """Assert generated profile and hook artifacts are removed and any
-    pre-existing canary path (including .devin/hooks.v1.json) is unchanged.
-    """
-    hooks_file = canary / ".devin" / "hooks.v1.json"
-    if preexisting_canary_hook_bytes is not None:
-        if not hooks_file.is_file():
-            errors.append("Pre-existing .devin/hooks.v1.json was removed instead of restored")
-        else:
-            if hooks_file.read_bytes() != preexisting_canary_hook_bytes:
-                errors.append("Pre-existing .devin/hooks.v1.json was not restored byte-for-byte")
-            old = canary_snapshot.get(hooks_file.resolve())
-            if old is not None:
-                current_mode = stat.S_IMODE(hooks_file.lstat().st_mode)
-                if current_mode != old.mode:
-                    errors.append(
-                        f"Pre-existing .devin/hooks.v1.json mode changed: "
-                        f"{oct(old.mode)} -> {oct(current_mode)}"
-                    )
-    else:
-        if hooks_file.is_file():
-            errors.append("Run-created .devin/hooks.v1.json was not removed")
-
-    profile_path_str = manifest.get("profile_path")
-    if profile_path_str:
-        profile_dir = Path(profile_path_str).resolve().parent
-        if profile_dir.is_dir():
-            errors.append(f"Generated profile directory was not removed: {profile_dir}")
-
-    # Every path that existed in the canary before the run must still exist with
-    # the same kind, mode, size, digest, and symlink target.
-    for path, old in canary_snapshot.items():
-        if not path.exists() and not path.is_symlink():
-            errors.append(f"Pre-existing canary path was removed: {path}")
-            continue
-        new = _snapshot_path(path)
-        if new is None:
-            errors.append(f"Cannot stat pre-existing canary path: {path}")
-            continue
-        if (
-            old.kind != new.kind
-            or old.mode != new.mode
-            or old.size != new.size
-            or old.digest != new.digest
-            or old.target != new.target
-        ):
-            errors.append(
-                f"Pre-existing canary path changed: {path} "
-                f"({old.kind} {oct(old.mode)} size={old.size}) -> "
-                f"({new.kind} {oct(new.mode)} size={new.size})"
-            )
 
 
 def _check_file_modes(run_dir: Path, errors: list[str]) -> None:
@@ -1404,30 +1501,33 @@ def _check_canary_integrity(
     mode-for-mode; run-created hooks and generated profiles must be removed.
     """
     owned_paths: set[Path] = (
-        {Path(p).resolve() for p in manifest.get("owned_paths", [])} if manifest else set()
+        {Path(p).absolute() for p in manifest.get("owned_paths", [])} if manifest else set()
     )
     owned_roots: list[Path] = (
-        [Path(p).resolve() for p in manifest.get("owned_roots", [])] if manifest else []
+        [Path(p).absolute() for p in manifest.get("owned_roots", [])] if manifest else []
     )
     owned_dirs: set[Path] = (
-        {Path(p).resolve() for p in manifest.get("owned_dirs", [])} if manifest else set()
+        {Path(p).absolute() for p in manifest.get("owned_dirs", [])} if manifest else set()
     )
 
+    allowed_canary = canary.absolute()
     hooks_file = canary / ".devin" / "hooks.v1.json"
+    hooks_abs = hooks_file.absolute()
     pre_existing: set[Path] = set(canary_snapshot.keys())
     if preexisting_canary_hook_bytes is not None:
-        pre_existing.add(hooks_file.resolve())
+        pre_existing.add(hooks_abs)
 
-    for path in _walk_no_follow(canary):
-        resolved = path.resolve()
-        old = canary_snapshot.get(resolved)
-        is_pre = resolved in pre_existing
+    def _check_canary_entry(path: Path) -> None:
+        abs_path = path.absolute()
+        old = canary_snapshot.get(abs_path)
+        is_pre = abs_path in pre_existing
+        entry = _snapshot_path(path)
 
         if is_pre:
-            if _is_owned(resolved, owned_paths, owned_roots, owned_dirs):
-                errors.append(f"Pre-existing canary path marked as owned: {resolved}")
-            if resolved == hooks_file.resolve() and preexisting_canary_hook_bytes is not None:
-                if not hooks_file.is_file():
+            if _is_owned(abs_path, owned_paths, owned_roots, owned_dirs):
+                errors.append(f"Pre-existing canary path marked as owned: {abs_path}")
+            if abs_path == hooks_abs and preexisting_canary_hook_bytes is not None:
+                if not hooks_file.is_file() and not hooks_file.is_symlink():
                     errors.append(
                         "Pre-existing .devin/hooks.v1.json was removed instead of restored"
                     )
@@ -1443,41 +1543,52 @@ def _check_canary_integrity(
                                 f"Pre-existing .devin/hooks.v1.json mode changed: "
                                 f"{oct(preexisting_canary_hook_mode)} -> {oct(current_mode)}"
                             )
-                continue
+                return
             if old is None:
-                continue
-            new = _snapshot_path(path)
-            if new is None:
-                errors.append(f"Cannot stat pre-existing canary path: {resolved}")
-                continue
+                return
+            if entry is None:
+                errors.append(f"Cannot stat pre-existing canary path: {abs_path}")
+                return
             if (
-                old.kind != new.kind
-                or old.mode != new.mode
-                or old.size != new.size
-                or old.digest != new.digest
-                or old.target != new.target
+                old.kind != entry.kind
+                or old.mode != entry.mode
+                or old.size != entry.size
+                or old.digest != entry.digest
+                or old.target != entry.target
             ):
                 errors.append(
-                    f"Pre-existing canary path changed: {resolved} "
+                    f"Pre-existing canary path changed: {abs_path} "
                     f"({old.kind} {oct(old.mode)} size={old.size}) -> "
-                    f"({new.kind} {oct(new.mode)} size={new.size})"
+                    f"({entry.kind} {oct(entry.mode)} size={entry.size})"
                 )
-        else:
-            if not _is_owned(resolved, owned_paths, owned_roots, owned_dirs):
-                errors.append(f"New unowned canary path: {resolved}")
+            return
+
+        # New path: must be declared/owned; symlinks also checked for boundary escape.
+        if entry is not None and entry.kind == "symlink":
+            target_path = _resolve_symlink_target(path, entry.target)
+            if target_path is not None and not _is_allowed_path(target_path, allowed_canary):
+                errors.append(
+                    f"New canary symlink escapes permitted boundary: {abs_path} -> {entry.target}"
+                )
+                return
+        if not _is_owned(abs_path, owned_paths, owned_roots, owned_dirs):
+            errors.append(f"New unowned canary path: {abs_path}")
+
+    for path in _walk_no_follow(canary):
+        _check_canary_entry(path)
 
     # Second pass: catch any pre-existing paths that were deleted during the run.
-    for resolved in pre_existing:
-        if not os.path.lexists(str(resolved)):
-            errors.append(f"Pre-existing canary path was deleted: {resolved}")
+    for pre in pre_existing:
+        if not os.path.lexists(str(pre)):
+            errors.append(f"Pre-existing canary path was deleted: {pre}")
 
     profile_path_str = manifest.get("profile_path") if manifest else None
     if profile_path_str:
-        profile_dir = Path(profile_path_str).resolve().parent
+        profile_dir = Path(profile_path_str).absolute().parent
         if profile_dir.is_dir():
             errors.append(f"Generated profile directory was not removed: {profile_dir}")
 
-    if preexisting_canary_hook_bytes is None and hooks_file.is_file():
+    if preexisting_canary_hook_bytes is None and (hooks_file.is_file() or hooks_file.is_symlink()):
         errors.append("Run-created .devin/hooks.v1.json was not removed")
 
 
