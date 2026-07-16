@@ -2015,8 +2015,10 @@ def test_canary_intermediate_symlink_escape_rejected():
     """A canary symlink whose effective target escapes through a pre-existing
     intermediate symlink must be rejected.
     """
+    fixture = _make_canary_fixture_with_symlink("bridge", Path("/tmp"))
     rc, errors, _ = _run_contract(
         candidate=TESTKIT / "fixtures" / "canary-intermediate-symlink-escape-candidate.py",
+        canary_fixture=fixture / "canary",
     )
     assert rc != 0
     assert any(
