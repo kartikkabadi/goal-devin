@@ -1704,3 +1704,67 @@ def test_sentinel_pid_rejected_without_killing_sentinel():
         except subprocess.TimeoutExpired:
             sentinel.kill()
             sentinel.wait()
+
+
+def test_delete_preexisting_success_candidate_rejected():
+    """A candidate that deletes a pre-existing canary file during a successful run
+    must be rejected for canary integrity.
+    """
+    rc, errors, _ = _run_contract(
+        candidate=TESTKIT / "fixtures" / "delete-preexisting-success-candidate.py",
+    )
+    assert rc != 0
+    assert any("deleted" in e.lower() for e in errors), errors
+
+
+def test_delete_preexisting_error_candidate_rejected():
+    """A candidate that deletes a pre-existing canary file and exits nonzero must still
+    have the deletion detected.
+    """
+    rc, errors, _ = _run_contract(
+        candidate=TESTKIT / "fixtures" / "delete-preexisting-error-candidate.py",
+    )
+    assert rc != 0
+    assert any("deleted" in e.lower() for e in errors), errors
+
+
+def test_normal_timeout_reaps_sidecar():
+    """A normal-mode candidate whose fake-devin hangs must be killed and the detached
+    sidecar reaped.
+    """
+    start = time.monotonic()
+    rc, errors, runtime_root = _run_contract(
+        timeout=2,
+        keep=True,
+        extra_env={"GOAL_DEVIN_FAKE_HANG": "1"},
+    )
+    elapsed = time.monotonic() - start
+    try:
+        assert rc != 0
+        assert elapsed < 8, f"runner did not enforce timeout ({elapsed:.1f}s)"
+        run_dir = _find_run_dir(runtime_root)
+        assert run_dir, f"No run directory found in {runtime_root}"
+        sidecar_pid_path = run_dir / "sidecar.pid"
+        assert sidecar_pid_path.exists(), "sidecar.pid missing"
+        sidecar_pid = int(sidecar_pid_path.read_text(encoding="utf-8").strip().split()[0])
+        assert not _is_alive(sidecar_pid), f"sidecar {sidecar_pid} is still alive after timeout"
+    finally:
+        shutil.rmtree(runtime_root.parent, ignore_errors=True)
+
+
+def test_partial_pid_rejected_and_sidecar_killed():
+    """A candidate that writes a valid sidecar.pid but no child.pid must be rejected,
+    and the valid sidecar must still be reaped.
+    """
+    start = time.monotonic()
+    rc, errors, _ = _run_contract(
+        candidate=TESTKIT / "fixtures" / "partial-pid-candidate.py",
+        process_overlap=True,
+        timeout=2,
+    )
+    elapsed = time.monotonic() - start
+    assert rc != 0
+    assert any("pid" in e.lower() for e in errors), errors
+    assert elapsed < 8, f"runner did not fail within the timeout bound ({elapsed:.1f}s)"
+    time.sleep(0.5)
+    assert _no_process_with("partial-pid-candidate.py")

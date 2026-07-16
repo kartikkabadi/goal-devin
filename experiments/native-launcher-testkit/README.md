@@ -64,7 +64,7 @@ The contract verifies:
 - schema validity of manifest, event, and summary artifacts;
 - language-neutral schema conformance corpus parity between the shared validator
   and the candidate validator;
-- manifest ownership contract (`owned_paths`/`owned_roots`/`owned_prefixes`);
+- manifest ownership contract (`owned_paths`/`owned_roots`/`owned_dirs`);
 - event schema validation at candidate startup and fail-closed sidecar behavior when
   the schema is missing or invalid;
 - malformed/incompatible `.devin/hooks.v1.json` rejection without project mutation;
@@ -73,7 +73,13 @@ The contract verifies:
 - outside-write rejection: `--runtime-root` must be inside `--base-dir`, and no files
   outside the allowlist are permitted;
 - ownership rejection: any generated artifact not declared in the manifest fails the
-  contract, and pre-existing/user-owned paths must never be marked as owned.
+  contract, and pre-existing/user-owned paths must never be marked as owned;
+- canonical event provenance: a retained `run_subagent` event for the generated
+  profile is required; a forged `summary.json` cannot satisfy the contract by itself;
+- pre-existing canary path deletion detection in both success and nonzero-exit cases;
+- normal-mode timeout cleanup that reaps the detached sidecar via validated PIDs;
+- portable process identity (`/proc` on Linux, `ps` fallback on macOS/Unix) with an
+  explicit refusal to launch on unsupported platforms.
 
 ## What is not proven
 

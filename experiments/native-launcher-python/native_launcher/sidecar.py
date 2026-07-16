@@ -57,7 +57,19 @@ class Sidecar:
         self.tools: dict[str, int] = {}
         self.profiles: dict[str, int] = {}
         self.last_event: dict | None = None
+        self.profile_id = self._load_profile_id()
+        self.canonical_event_ids: set[str] = set()
         self.running = True
+
+    def _load_profile_id(self) -> str | None:
+        manifest_path = self.runtime_dir / "manifest.json"
+        try:
+            data = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+            return None
+        if isinstance(data, dict):
+            return data.get("profile_id")
+        return None
 
     def _validate_event(self, event: dict) -> bool:
         if not self.schema_path.exists():
@@ -231,6 +243,8 @@ class Sidecar:
                         del self.profiles[existing]
                         break
         self._add_profile(profile)
+        if tool == "run_subagent" and profile == self.profile_id:
+            self.canonical_event_ids.add(event_id)
         self.last_event = {
             "tool_name": tool,
             "profile": profile,
@@ -270,6 +284,9 @@ class Sidecar:
         ):
             removed = False
             for i, (p, size, _) in enumerate(entries):
+                if p.stem in self.canonical_event_ids:
+                    # Never delete the canonical run_subagent observation for this run.
+                    continue
                 if p.stem in self.consumed and p.exists():
                     try:
                         p.unlink()

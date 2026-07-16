@@ -376,23 +376,70 @@ def find_run_dir(
 
 
 def _is_process_alive(pid: int) -> bool:
+    """Return True if *pid* is a live process.
+
+    Uses ``os.kill(pid, 0)`` on Unix; falls back to ``ps`` on platforms where the
+    zero signal is unsupported.
+    """
     try:
         os.kill(pid, 0)
-    except (OSError, ProcessLookupError):
-        return False
-    return True
+        return True
+    except (OSError, ProcessLookupError, ValueError, AttributeError):
+        pass
+    try:
+        result = subprocess.run(
+            ["ps", "-p", str(pid), "-o", "pid="],
+            capture_output=True,
+            text=True,
+            timeout=2,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            return True
+    except (OSError, subprocess.TimeoutExpired, ValueError, FileNotFoundError):
+        pass
+    return False
 
 
 def _read_ppid(pid: int) -> int | None:
-    """Return the parent PID for a live process from /proc, or None."""
+    """Return the parent PID for a live process, or None if it cannot be determined.
+
+    Linux exposes this in ``/proc/<pid>/status``; macOS and other Unixes are
+    supported via ``ps -o ppid= -p <pid>``.
+    """
     try:
         with open(f"/proc/{pid}/status") as fh:
             for line in fh:
                 if line.startswith("PPid:"):
                     return int(line.split()[1])
     except (OSError, ValueError):
-        return None
+        pass
+    try:
+        result = subprocess.run(
+            ["ps", "-o", "ppid=", "-p", str(pid)],
+            capture_output=True,
+            text=True,
+            timeout=2,
+        )
+        if result.returncode == 0:
+            return int(result.stdout.strip())
+    except (OSError, subprocess.TimeoutExpired, ValueError, FileNotFoundError):
+        pass
     return None
+
+
+def _process_identity_supported() -> bool:
+    """Return True if we can determine process-group membership and parent PIDs.
+
+    On platforms where neither ``os.getpgid`` nor ``ps`` works, cleanup coverage
+    would be silently lost, so callers should refuse to launch.
+    """
+    try:
+        os.getpgid(os.getpid())
+    except (OSError, AttributeError):
+        return False
+    if _read_ppid(os.getpid()) is None:
+        return False
+    return True
 
 
 def _pid_is_descendant(pid: int, ancestor: int, max_depth: int = 20) -> bool:
@@ -422,7 +469,7 @@ def _pid_is_in_tree(pid: int, root_pid: int) -> bool:
     try:
         if os.getpgid(pid) == os.getpgid(root_pid):
             return True
-    except (OSError, ProcessLookupError):
+    except (OSError, ProcessLookupError, AttributeError):
         pass
     return _pid_is_descendant(pid, root_pid)
 
@@ -489,12 +536,57 @@ def _kill_process_tree(
                 pass
 
 
-def _collect_pids(proc_pid: int, run_dir: Path, deadline: float) -> list[int]:
+def _discover_pids(proc_pid: int, run_dir: Path, deadline: float) -> list[int]:
+    """Return the list of candidate-owned PIDs found under *run_dir*.
+
+    Validates ancestry/process-group membership while the supervisor is still alive.
+    Does not raise on missing PID files; callers that need a complete set must
+    validate the returned list themselves.
+    """
     supervisor_pid_path = run_dir / "supervisor.pid"
     while not supervisor_pid_path.exists() and time.monotonic() < deadline:
         time.sleep(0.01)
     if not supervisor_pid_path.exists():
-        raise RuntimeError("supervisor.pid missing")
+        return []
+    try:
+        supervisor_pid = int(supervisor_pid_path.read_text(encoding="utf-8").strip().split()[0])
+    except (OSError, ValueError):
+        return []
+    if supervisor_pid != proc_pid:
+        return []
+    if not _pid_is_in_tree(supervisor_pid, proc_pid):
+        return []
+
+    pids: list[int] = [supervisor_pid]
+    for name in ("sidecar.pid", "child.pid"):
+        pid_path = run_dir / name
+        while not pid_path.exists() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        if not pid_path.exists():
+            continue
+        try:
+            pid = int(pid_path.read_text(encoding="utf-8").strip().split()[0])
+        except (OSError, ValueError):
+            continue
+        if pid in pids:
+            continue
+        if not _is_process_alive(pid):
+            continue
+        if not _pid_is_in_tree(pid, proc_pid):
+            continue
+        pids.append(pid)
+    return pids
+
+
+def _collect_pids(proc_pid: int, run_dir: Path, deadline: float) -> list[int]:
+    """Strict variant used by --process-overlap: all three PIDs must be present,
+    distinct, alive, and inside the candidate tree.
+    """
+    supervisor_pid_path = run_dir / "supervisor.pid"
+    while not supervisor_pid_path.exists() and time.monotonic() < deadline:
+        time.sleep(0.01)
+    if not supervisor_pid_path.exists():
+        raise RuntimeError("PID file missing: supervisor.pid")
     supervisor_pid = int(supervisor_pid_path.read_text(encoding="utf-8").strip().split()[0])
     if supervisor_pid != proc_pid:
         raise RuntimeError(
@@ -623,10 +715,7 @@ def _run_tty(
             returncode = proc.wait(timeout=max(0, deadline - time.monotonic()))
         except subprocess.TimeoutExpired:
             if run_dir_holder[0] is not None:
-                try:
-                    valid_pids = _collect_pids(proc.pid, run_dir_holder[0], time.monotonic() + 2)
-                except RuntimeError:
-                    pass
+                valid_pids = _discover_pids(proc.pid, run_dir_holder[0], time.monotonic() + 2)
             _kill_process_tree(proc, run_dir_holder[0], valid_pids)
             returncode = -1
     finally:
@@ -649,6 +738,8 @@ def _run_normal(
     runtime_root: Path,
     deadline: float,
 ) -> tuple[subprocess.Popen, int, Path | None, bytes, bytes]:
+    import threading
+
     proc = subprocess.Popen(
         cmd,
         stdin=subprocess.DEVNULL,
@@ -658,19 +749,42 @@ def _run_normal(
         start_new_session=True,
     )
     run_dir: Path | None = None
+    valid_pids: list[int] | None = None
+    stop_event = threading.Event()
+    run_dir_holder: list[Path | None] = [None]
+    pids_holder: list[list[int] | None] = [None]
+
+    def finder() -> None:
+        while not stop_event.is_set() and time.monotonic() < deadline:
+            run_dir = find_run_dir(runtime_root, timeout=0.2)
+            if run_dir is not None:
+                run_dir_holder[0] = run_dir
+                # Discover candidate-owned PIDs while the supervisor is alive.
+                pids = _discover_pids(proc.pid, run_dir, time.monotonic() + 2)
+                pids_holder[0] = pids
+                return
+            time.sleep(0.01)
+
+    finder_thread = threading.Thread(target=finder, daemon=True)
+    finder_thread.start()
+
     try:
         remaining = deadline - time.monotonic()
         stdout, stderr = proc.communicate(timeout=max(0, remaining))
         returncode = proc.returncode if proc.returncode is not None else -1
     except subprocess.TimeoutExpired:
-        _kill_process_tree(proc, None)
-        run_dir = find_run_dir(runtime_root, timeout=0.5)
-        _kill_process_tree(proc, run_dir)
-        return proc, -1, run_dir, b"", b""
+        run_dir = run_dir_holder[0]
+        valid_pids = pids_holder[0]
+        _kill_process_tree(proc, run_dir, valid_pids)
+        returncode = -1
+        stdout, stderr = b"", b""
     finally:
+        stop_event.set()
         if proc.poll() is None:
-            _kill_process_tree(proc, run_dir)
-    run_dir = find_run_dir(runtime_root, timeout=0.5)
+            _kill_process_tree(proc, run_dir_holder[0], pids_holder[0])
+        finder_thread.join(timeout=1)
+
+    run_dir = run_dir if run_dir is not None else find_run_dir(runtime_root, timeout=0.5)
     return proc, returncode, run_dir, stdout, stderr
 
 
@@ -708,7 +822,9 @@ def _run_normal_with_overlap(
         try:
             valid_pids = _collect_pids(proc.pid, run_dir, deadline)
         except RuntimeError as exc:
-            _kill_process_tree(proc, run_dir)
+            # Reap whatever valid PIDs we can prove belong to the candidate tree.
+            valid_pids = _discover_pids(proc.pid, run_dir, time.monotonic() + 1)
+            _kill_process_tree(proc, run_dir, valid_pids)
             try:
                 remaining = deadline - time.monotonic()
                 stdout, stderr = proc.communicate(timeout=max(0, min(5, remaining)))
@@ -1157,10 +1273,10 @@ def _check_event_provenance(
     contract_dir: Path,
     errors: list[str],
 ) -> None:
-    """Independently prove that at least one retained event exists, validate every
-    retained event, and cross-check tool/profile linkage against the manifest and
-    summary.  Stress-mode bursts may drop the canonical run_subagent file, so the
-    summary's persistent tool/profile map is also accepted as proof when present.
+    """Independently prove that at least one retained event for this run was
+    observed, validate every retained event, and cross-check consumed ids. A
+    candidate can no longer forge a summary to satisfy this check without also
+    retaining a schema-valid run_subagent event for the generated profile.
     """
     events_dir = run_dir / "events"
     if not events_dir.is_dir():
@@ -1212,20 +1328,9 @@ def _check_event_provenance(
                 f"summary.consumed_event_ids reference missing event files: {missing[:3]}"
             )
 
-        tools = summary.get("tools", {})
-        profiles = summary.get("profiles", {})
-        summary_proves_run = (
-            isinstance(tools, dict)
-            and "run_subagent" in tools
-            and isinstance(profiles, dict)
-            and expected_profile in profiles
-        )
-    else:
-        summary_proves_run = False
-
-    if not run_subagent_seen and not summary_proves_run:
+    if not run_subagent_seen:
         errors.append(
-            f"No retained event or summary linkage proves tool_name 'run_subagent' for profile {profile_id!r}"
+            f"No retained event proves tool_name 'run_subagent' for profile {profile_id!r}"
         )
 
     last = (summary or {}).get("last_event")
@@ -1309,6 +1414,11 @@ def _check_canary_integrity(
             if not _is_owned(resolved, owned_paths, owned_roots, owned_dirs):
                 errors.append(f"New unowned canary path: {resolved}")
 
+    # Second pass: catch any pre-existing paths that were deleted during the run.
+    for resolved in pre_existing:
+        if not os.path.lexists(str(resolved)):
+            errors.append(f"Pre-existing canary path was deleted: {resolved}")
+
     profile_path_str = manifest.get("profile_path") if manifest else None
     if profile_path_str:
         profile_dir = Path(profile_path_str).resolve().parent
@@ -1382,6 +1492,15 @@ def run_contract(args: argparse.Namespace) -> list[str]:
         source = Path(args.existing_hooks).resolve()
         preexisting_canary_hook_bytes = source.read_bytes()
         preexisting_canary_hook_mode = stat.S_IMODE(source.lstat().st_mode)
+
+    if not _process_identity_supported():
+        errors.append(
+            "Process identity verification is not supported on this platform; refusing to launch candidate"
+        )
+        _cleanup(
+            base_dir, runtime_root, args.keep_artifacts, base_dir_removable, runtime_root_removable
+        )
+        return errors
 
     run_dir: Path | None = None
     returncode = -1
@@ -1508,6 +1627,13 @@ def run_contract(args: argparse.Namespace) -> list[str]:
             if summary.get("total_events", 0) <= limits["max_retained_event_files"]:
                 errors.append(
                     "stress mode did not consume more events than max_retained_event_files"
+                )
+        else:
+            expected_events = 1
+            actual_events = summary.get("total_events", 0)
+            if actual_events != expected_events:
+                errors.append(
+                    f"deterministic mode expected exactly {expected_events} event, got {actual_events}"
                 )
 
         _check_lifecycle(run_dir / "lifecycle.log", errors)
