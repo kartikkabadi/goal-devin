@@ -5,12 +5,14 @@ Records its invocation environment, verifies the Goal Devin generated profile
 and hook, invokes the observation hook, and exits without network access.
 """
 
+import concurrent.futures
 import json
 import os
 import shlex
 import stat
 import subprocess
 import sys
+import tempfile
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -251,6 +253,130 @@ def _invoke_hook(command: list[str], profile_id: str) -> int:
     return proc.returncode
 
 
+def _read_limits(runtime_dir: Path) -> dict[str, int]:
+    """Read the runtime limits, falling back to safe defaults."""
+    defaults: dict[str, int] = {
+        "max_tool_name_length": 128,
+        "max_profile_length": 128,
+        "max_event_value_length": 256,
+        "max_event_json_bytes": 4096,
+        "max_total_spool_bytes": 1024 * 1024,
+        "max_retained_event_files": 100,
+        "max_distinct_tools": 50,
+        "max_distinct_profiles": 50,
+        "max_recent_event_ids": 20,
+        "max_summary_size_bytes": 64 * 1024,
+    }
+    try:
+        data = json.loads((runtime_dir / "limits.json").read_text(encoding="utf-8"))
+        if isinstance(data, dict):
+            for key, value in data.items():
+                if isinstance(value, int) and not isinstance(value, bool) and value >= 1:
+                    defaults[key] = value
+    except (OSError, json.JSONDecodeError, ValueError):
+        pass
+    return defaults
+
+
+def _atomic_write_event(events_dir: Path, event_id: str, event: dict) -> Path:
+    """Atomically write a single event JSON file."""
+    directory = events_dir
+    directory.mkdir(parents=True, exist_ok=True)
+    data = json.dumps(event, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    fd, tmp = tempfile.mkstemp(dir=directory, prefix=f"{event_id}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(data)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.chmod(tmp, 0o600)
+        final = directory / f"{event_id}.json"
+        os.rename(tmp, final)
+        return final
+    except Exception:
+        try:
+            os.unlink(tmp)
+        except FileNotFoundError:
+            pass
+        raise
+
+
+def _stress_event_id(prefix: str, idx: int) -> str:
+    return f"{prefix}-{idx:08d}-{os.urandom(4).hex()}"
+
+
+def _stress_emit_events(runtime_dir: Path, canary: Path, profile_id: str, limits: dict[str, int]) -> None:
+    """Emit a controlled burst of valid/invalid spool files to exercise the sidecar bounds."""
+    events_dir = runtime_dir / "events"
+    now = _now()
+
+    def make_event(i: int, num_tools: int, num_profiles: int) -> dict:
+        return {
+            "schema_version": 1,
+            "event": "PostToolUse",
+            "tool_name": f"tool-{i % num_tools}",
+            "profile": f"profile-{i % num_profiles}",
+            "is_background": False,
+            "success": True,
+            "observed_at": now,
+        }
+
+    num_tools = max(limits["max_distinct_tools"], 1)
+    num_profiles = max(limits["max_distinct_profiles"], 1)
+    extra = 25
+    num_valid = limits["max_retained_event_files"] + extra
+    num_distinct_tools = limits["max_distinct_tools"] + 10
+    num_distinct_profiles = limits["max_distinct_profiles"] + 10
+
+    def write_valid_batch(start: int, count: int) -> None:
+        for i in range(start, start + count):
+            event_id = _stress_event_id("evt", i)
+            event = make_event(i, num_distinct_tools, num_distinct_profiles)
+            _atomic_write_event(events_dir, event_id, event)
+
+    # First, exercise the installed hook through a single valid event.
+    hook_command = _find_hook_command(canary)
+    if hook_command is None:
+        raise RuntimeError("Observation hook not installed in canary")
+    _invoke_hook(hook_command, profile_id)
+
+    threads = 4
+    per_thread = num_valid // threads
+    with concurrent.futures.ThreadPoolExecutor(max_workers=threads) as executor:
+        futures = [executor.submit(write_valid_batch, i * per_thread, per_thread) for i in range(threads)]
+        for future in concurrent.futures.as_completed(futures):
+            future.result()
+
+    # Malformed/rejected event files.
+    oversized = events_dir / "oversized.json"
+    oversized.write_bytes(os.urandom(limits["max_event_json_bytes"] + 1000))
+    os.chmod(oversized, 0o600)
+
+    long_tool_name = "x" * (limits["max_tool_name_length"] + 1)
+    long_tool_event = {
+        "schema_version": 1,
+        "event": "PostToolUse",
+        "tool_name": long_tool_name,
+        "profile": profile_id,
+        "is_background": False,
+        "success": True,
+        "observed_at": now,
+    }
+    _atomic_write_event(events_dir, "long-tool", long_tool_event)
+
+    bad_utf8 = events_dir / "bad-utf8.json"
+    bad_utf8.write_bytes(b"\xff\xfe" * 16)
+    os.chmod(bad_utf8, 0o600)
+
+    not_object = events_dir / "not-object.json"
+    not_object.write_text(json.dumps([]), encoding="utf-8")
+    os.chmod(not_object, 0o600)
+
+    truncated = events_dir / "truncated.json"
+    truncated.write_text('{"schema_version": 1, "event": "PostToolUse"', encoding="utf-8")
+    os.chmod(truncated, 0o600)
+
+
 def _tty_status() -> dict[str, bool]:
     return {
         "stdin": sys.stdin.isatty(),
@@ -277,6 +403,14 @@ def _cmd_version() -> int:
 def _cmd_help() -> int:
     print("fake-devin: deterministic devin stand-in for the Goal Devin testkit")
     return 0
+
+
+def _verbose_output() -> None:
+    """Write enough bytes to stdout to fill a PTY buffer if the runner is not draining."""
+    chunk = b"x" * 4096
+    for _ in range(512):
+        sys.stdout.buffer.write(chunk)
+    sys.stdout.buffer.flush()
 
 
 def _parse_native_argv(argv: list[str]) -> tuple[str, str]:
@@ -341,16 +475,29 @@ def _main() -> int:
     _lifecycle_log("child_start")
 
     no_poll = os.environ.get("GOAL_DEVIN_FAKE_NO_POLL") in ("1", "true", "yes")
-    if not no_poll:
-        # Pause for the runner to observe process overlap, then continue.
+    stress = os.environ.get("GOAL_DEVIN_FAKE_STRESS") in ("1", "true", "yes")
+    verbose = os.environ.get("GOAL_DEVIN_FAKE_VERBOSE") in ("1", "true", "yes")
+    hang = os.environ.get("GOAL_DEVIN_FAKE_HANG") in ("1", "true", "yes")
+
+    if verbose:
+        _verbose_output()
+
+    if not no_poll and not stress:
         _barrier_wait(runtime_dir)
 
-    hook_rc = _invoke_hook(hook_command, profile_id)
-    if hook_rc != 0:
-        raise RuntimeError(f"Observation hook exited with code {hook_rc}")
+    if stress:
+        limits = _read_limits(runtime_dir) if runtime_dir else {}
+        _stress_emit_events(runtime_dir or Path("/dev/null"), canary, profile_id, limits)
+    else:
+        hook_rc = _invoke_hook(hook_command, profile_id)
+        if hook_rc != 0:
+            raise RuntimeError(f"Observation hook exited with code {hook_rc}")
+
+    if hang:
+        time.sleep(3600)
 
     sidecar_total_events = 0
-    if not no_poll:
+    if not no_poll and not stress:
         sleep = float(os.environ.get("GOAL_DEVIN_FAKE_SLEEP", DEFAULT_SLEEP))
         time.sleep(sleep)
 
@@ -382,7 +529,7 @@ def _main() -> int:
         "permission_mode": permission_mode,
         "profile_id": profile_id,
         "hook_command": hook_command,
-        "hook_returncode": hook_rc,
+        "hook_returncode": 0,
         "sidecar_total_events": sidecar_total_events,
         "exit_code": exit_code,
         "timestamp": _now(),

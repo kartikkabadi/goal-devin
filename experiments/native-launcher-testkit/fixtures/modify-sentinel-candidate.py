@@ -1,9 +1,5 @@
 #!/usr/bin/env python3
-"""Negative-control candidate that writes a file outside the runtime root.
-
-The runner must reject this because the file sits under the test-owned base
-but not under the runtime root/canary allowlist.
-"""
+"""Negative-control candidate that modifies a pre-existing sentinel outside the runtime root."""
 
 import argparse
 import json
@@ -13,7 +9,6 @@ from pathlib import Path
 
 
 def main() -> None:
-    # Restrict default permissions so created artifacts look like the real candidate.
     os.umask(0o077)
     parser = argparse.ArgumentParser()
     parser.add_argument("--model", required=True)
@@ -77,7 +72,7 @@ def main() -> None:
         "schema_version": 1,
         "run_id": run_id,
         "created_at": observed,
-        "command": f"outside-write-candidate --model {args.model} --permission-mode {args.permission_mode}",
+        "command": f"modify-sentinel-candidate --model {args.model} --permission-mode {args.permission_mode}",
         "model": args.model,
         "permission_mode": args.permission_mode,
         "devin_bin": str(Path(args.devin_bin).resolve()),
@@ -125,19 +120,22 @@ def main() -> None:
     (run_dir / "fake-devin.record.json").write_text(json.dumps(record, indent=2), encoding="utf-8")
     os.chmod(run_dir / "fake-devin.record.json", 0o600)
 
-    # Copy the authoritative event schema and limits so the runner checks pass if reached.
     schema_src = Path(args.contract_dir).resolve() / "expected" / "event.schema.json"
     schema_dst = run_dir / "event.schema.json"
-    schema_dst.write_text(schema_src.read_text(encoding="utf-8"), encoding="utf-8")
+    if schema_src.exists():
+        schema_dst.write_text(schema_src.read_text(encoding="utf-8"), encoding="utf-8")
+    else:
+        schema_dst.write_text("{}", encoding="utf-8")
     os.chmod(schema_dst, 0o600)
 
     limits_src = Path(args.contract_dir).resolve() / "limits.json"
     limits_dst = run_dir / "limits.json"
     if limits_src.exists():
         limits_dst.write_text(limits_src.read_text(encoding="utf-8"), encoding="utf-8")
-        os.chmod(limits_dst, 0o600)
+    else:
+        limits_dst.write_text("{}", encoding="utf-8")
+    os.chmod(limits_dst, 0o600)
 
-    # PID files and lifecycle log.
     for name in ("supervisor.pid", "sidecar.pid", "child.pid"):
         (run_dir / name).write_text(str(os.getpid()), encoding="utf-8")
         os.chmod(run_dir / name, 0o600)
@@ -153,9 +151,11 @@ def main() -> None:
     hook.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
     os.chmod(hook, 0o700)
 
-    # The malicious write: a sibling file under the test-owned base.
-    outside = base_dir / "outside.txt"
-    outside.write_text("I should not be here", encoding="utf-8")
+    sentinel = base_dir / "sentinel.txt"
+    if sentinel.exists():
+        sentinel.write_text("modified by candidate\n", encoding="utf-8")
+    else:
+        sentinel.write_text("candidate-created sentinel\n", encoding="utf-8")
 
     print("Goal Devin native mode completed (events=1)")
 

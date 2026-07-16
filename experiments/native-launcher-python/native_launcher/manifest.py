@@ -21,15 +21,16 @@ def make_manifest(
     events_dir: Path,
     summary_path: Path,
     lifecycle_log_path: Path,
+    owned_dirs: list[Path],
 ) -> Path:
     """Write the run manifest into *runtime_dir* and return its path.
 
-    The manifest declares every path exclusively owned by this run.  Only
-    directories that the candidate actually creates are listed in
-    ``owned_roots``; pre-existing user/project directories (``.devin``,
-    ``.devin/agents``) are never claimed.  ``owned_paths`` lists concrete
-    files.  The temporary project hook is only listed if the candidate created
-    it, not if it was borrowed from an existing fixture.
+    The manifest declares every path exclusively owned by this run.  ``owned_dirs``
+    lists exact directories created by the run (e.g. the runtime directory, events
+    directory, and generated profile directory plus any intermediate ancestors
+    that did not exist before).  ``owned_paths`` lists concrete files.
+    ``owned_roots`` lists directory trees whose contents are fully owned.
+    Pre-existing user/project directories are never claimed.
     """
     manifest_path = runtime_dir / "manifest.json"
     hooks_file = canary / ".devin" / "hooks.v1.json"
@@ -75,6 +76,7 @@ def make_manifest(
         "goal_devin_generated": True,
         "owned_paths": owned_paths,
         "owned_roots": owned_roots,
+        "owned_dirs": sorted({str(d.resolve()) for d in owned_dirs}),
     }
     runtime_dir.mkdir(parents=True, exist_ok=True)
     atomic_write(manifest_path, json.dumps(manifest, indent=2))

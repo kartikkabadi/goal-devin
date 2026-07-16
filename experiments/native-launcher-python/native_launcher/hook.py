@@ -34,6 +34,30 @@ def _default_limits() -> Limits:
     return Limits()
 
 
+def _coerce_limits(data: Any) -> Limits:
+    """Return a validated Limits object from parsed JSON, or defaults on any error."""
+    if not isinstance(data, dict):
+        return _default_limits()
+    try:
+        tool = int(data.get("max_tool_name_length", Limits.max_tool_name_length))
+        profile = int(data.get("max_profile_length", Limits.max_profile_length))
+        value = int(data.get("max_event_value_length", Limits.max_event_value_length))
+        event = int(data.get("max_event_json_bytes", Limits.max_event_json_bytes))
+        for v, name in (
+            (tool, "max_tool_name_length"),
+            (profile, "max_profile_length"),
+            (value, "max_event_value_length"),
+            (event, "max_event_json_bytes"),
+        ):
+            if not isinstance(v, int) or isinstance(v, bool) or v < 1:
+                raise ValueError(f"{name} must be a positive integer")
+        if event < max(tool, profile, value):
+            raise ValueError("max_event_json_bytes must be >= largest field limit")
+        return Limits(tool, profile, value, event)
+    except (ValueError, TypeError):
+        return _default_limits()
+
+
 def _load_limits(events_dir: Path) -> Limits:
     """Load limits from the runtime directory if present; otherwise use defaults."""
     runtime_dir = events_dir.parent
@@ -42,8 +66,8 @@ def _load_limits(events_dir: Path) -> Limits:
         return _default_limits()
     try:
         data = json.loads(limits_path.read_text(encoding="utf-8"))
-        return Limits(**{k: v for k, v in data.items() if k in Limits.__dataclass_fields__})
-    except (OSError, ValueError):
+        return _coerce_limits(data)
+    except (OSError, ValueError, json.JSONDecodeError, UnicodeDecodeError):
         return _default_limits()
 
 

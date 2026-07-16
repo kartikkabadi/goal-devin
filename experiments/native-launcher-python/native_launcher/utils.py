@@ -53,6 +53,47 @@ def mkdir_private(path: Path, mode: int = 0o700) -> None:
     os.chmod(path, mode)
 
 
+def ensure_private_dir(path: Path, mode: int = 0o700, exist_ok: bool = False) -> list[Path]:
+    """Create *path* and any missing parents with *mode*, returning created dirs.
+
+    If ``exist_ok`` is false (the default), the leaf directory is created with
+    ``exist_ok=False`` so a pre-existing leaf is a collision.  If ``exist_ok`` is
+    true, a pre-existing directory leaf is allowed but not claimed as created.
+    Each newly created directory is chmodded to *mode* after creation to ignore
+    the process umask.
+    """
+    created: list[Path] = []
+    stack: list[Path] = []
+    current = path
+    while True:
+        stack.append(current)
+        if current == path.anchor or current.parent == current:
+            break
+        current = current.parent
+
+    leaf_existed = False
+    for p in reversed(stack):
+        if p.exists():
+            if not p.is_dir():
+                raise FileExistsError(f"{p} exists and is not a directory")
+            if p == path:
+                if not exist_ok:
+                    raise FileExistsError(f"directory already exists: {path}")
+                leaf_existed = True
+            continue
+        p.mkdir(mode=mode, exist_ok=False)
+        created.append(p)
+    for p in created:
+        os.chmod(p, mode)
+    if leaf_existed:
+        # Verify the pre-existing leaf has safe permissions.
+        try:
+            os.chmod(path, mode)
+        except OSError:
+            pass
+    return created
+
+
 def atomic_write(path: Path, data: str, file_mode: int = 0o600) -> None:
     """Atomically write *data* to *path* with *file_mode* permissions."""
     directory = path.parent

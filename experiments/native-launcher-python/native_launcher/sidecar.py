@@ -9,9 +9,11 @@ import datetime
 import json
 import os
 import signal
+import stat
 import sys
 import time
 from pathlib import Path
+from typing import Any
 
 from .limits import Limits, load_limits
 from .schema import validate_file
@@ -70,7 +72,10 @@ class Sidecar:
             return False
         return True
 
-    def _check_field_lengths(self, event: dict) -> bool:
+    def _check_field_lengths(self, event: Any) -> bool:
+        if not isinstance(event, dict):
+            print("sidecar: event is not a JSON object; rejecting", file=sys.stderr, flush=True)
+            return False
         limits = self.limits
         for key in ("event", "tool_name", "profile", "observed_at"):
             value = event.get(key)
@@ -129,6 +134,21 @@ class Sidecar:
             return
         self.profiles[profile] = self.profiles.get(profile, 0) + 1
 
+    def _reject_file(self, path: Path, event_id: str, reason: str) -> None:
+        """Mark a spool file as terminally rejected and remove it if possible.
+
+        Files that cannot be deleted are left in the spool but tracked in
+        ``consumed`` so they are not reprocessed forever.  The trimmer will
+        count them toward the total byte bound and remove them if necessary.
+        """
+        print(f"sidecar: rejecting {path.name}: {reason}", file=sys.stderr, flush=True)
+        self.consumed.add(event_id)
+        try:
+            path.unlink()
+            self.consumed.discard(event_id)
+        except OSError:
+            pass
+
     def _process_file(self, path: Path) -> None:
         if path.suffix != ".json":
             return
@@ -137,18 +157,31 @@ class Sidecar:
             return
         try:
             data = path.read_bytes()
-            if not _validate_event_json_size(data, self.limits):
-                self.consumed.add(event_id)
-                return
-            event = json.loads(data.decode("utf-8"))
-        except (OSError, json.JSONDecodeError):
+        except OSError as exc:
+            self._reject_file(path, event_id, f"cannot read file: {exc}")
             return
+
+        if not _validate_event_json_size(data, self.limits):
+            self._reject_file(path, event_id, "exceeds max event JSON size")
+            return
+
+        try:
+            text = data.decode("utf-8")
+            event = json.loads(text)
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            self._reject_file(path, event_id, f"not valid UTF-8 JSON: {exc}")
+            return
+        except ValueError as exc:
+            self._reject_file(path, event_id, f"JSON parse error: {exc}")
+            return
+
         if not self._check_field_lengths(event):
-            self.consumed.add(event_id)
+            self._reject_file(path, event_id, "field length limit exceeded")
             return
         if not self._validate_event(event):
-            self.consumed.add(event_id)
+            self._reject_file(path, event_id, "schema validation failed")
             return
+
         self.consumed.add(event_id)
         self.consumed_order.append(event_id)
         self.total_events += 1
@@ -169,22 +202,32 @@ class Sidecar:
         """Remove oldest consumed event files to keep count and size bounded."""
         limits = self.limits
         try:
-            entries = [
-                (p, p.stat().st_size)
-                for p in self.events_dir.iterdir()
-                if p.suffix == ".json" and p.is_file()
-            ]
+            paths = list(self.events_dir.iterdir())
         except OSError:
             return
+
+        entries: list[tuple[Path, int, float]] = []
+        for p in paths:
+            if p.suffix != ".json":
+                continue
+            try:
+                st = p.lstat()
+                if not stat.S_ISREG(st.st_mode):
+                    continue
+                entries.append((p, st.st_size, st.st_mtime))
+            except OSError:
+                continue
+
         if not entries:
             return
-        entries.sort(key=lambda x: x[0].stat().st_mtime)
-        total = sum(size for _, size in entries)
+
+        entries.sort(key=lambda x: x[2])
+        total = sum(size for _, size, _ in entries)
         while (
             len(entries) > limits.max_retained_event_files or total > limits.max_total_spool_bytes
         ):
             removed = False
-            for i, (p, size) in enumerate(entries):
+            for i, (p, size, _) in enumerate(entries):
                 if p.stem in self.consumed and p.exists():
                     try:
                         p.unlink()

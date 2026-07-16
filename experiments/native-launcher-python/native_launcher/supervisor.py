@@ -15,9 +15,16 @@ from types import SimpleNamespace
 from typing import Any
 
 from . import __version__
+from .limits import load_limits
 from .manifest import make_manifest
 from .profile import make_profile, make_profile_id, remove_profile
-from .utils import atomic_write, has_symlink_component, mkdir_private, random_id, safe_path_under
+from .utils import (
+    atomic_write,
+    ensure_private_dir,
+    has_symlink_component,
+    random_id,
+    safe_path_under,
+)
 
 
 def _validate_model(model: str) -> None:
@@ -130,6 +137,15 @@ class Supervisor:
             raise RuntimeError(f"Invalid event schema shape: {event_schema_path}")
         self._event_schema = schema
 
+        limits_path = self.contract_dir / "limits.json"
+        limits_schema_path = self.contract_dir / "expected" / "limits.schema.json"
+        if not limits_path.exists():
+            raise RuntimeError(f"--contract-dir must contain limits.json: {self.contract_dir}")
+        try:
+            load_limits(limits_path, limits_schema_path, required=True)
+        except (OSError, ValueError) as exc:
+            raise RuntimeError(f"Invalid limits file: {exc}") from exc
+
         self.runtime_root = Path(args.runtime_root).resolve()
         self.canary_arg = Path(args.canary).resolve() if args.canary else None
         self.existing_hooks = Path(args.existing_hooks).resolve() if args.existing_hooks else None
@@ -152,6 +168,8 @@ class Supervisor:
         self.original_hooks_mode: int | None = None
         self.hook_owned: bool = False
         self.lifecycle_path: Path | None = None
+        self.owned_dirs: list[Path] = []
+        self.canary_created: bool = False
 
     def _env(self) -> dict[str, str]:
         env = os.environ.copy()
@@ -181,10 +199,9 @@ class Supervisor:
         os.chmod(event_schema_dst, 0o600)
 
         limits_src = self.contract_dir / "limits.json"
-        if limits_src.exists():
-            limits_dst = self.runtime_dir / "limits.json"
-            shutil.copyfile(limits_src, limits_dst)
-            os.chmod(limits_dst, 0o600)
+        limits_dst = self.runtime_dir / "limits.json"
+        shutil.copyfile(limits_src, limits_dst)
+        os.chmod(limits_dst, 0o600)
 
     def _install_hook_script(self) -> list[str]:
         hook_src = Path(__file__).resolve().parent / "hook.py"
@@ -220,10 +237,8 @@ class Supervisor:
 
         # Only create/chmod .devin if it does not already exist; a
         # pre-existing .devin directory belongs to the user/project.
-        devin_dir_created = not devin_dir.exists()
-        devin_dir.mkdir(parents=True, exist_ok=True)
-        if devin_dir_created:
-            os.chmod(devin_dir, 0o700)
+        created_devin = ensure_private_dir(devin_dir, mode=0o700, exist_ok=True)
+        self.owned_dirs.extend(created_devin)
 
         command_str = " ".join(shlex.quote(str(part)) for part in hook_command)
         goal_devin_entry = {
@@ -267,9 +282,12 @@ class Supervisor:
                 raise ValueError("canary path contains a symlink")
             self.canary = self.canary_arg
             self.canary.mkdir(parents=True, exist_ok=True)
+            self.canary_created = False
         else:
             self.canary = self.runtime_dir / "canary"
-            self.canary.mkdir(parents=True, exist_ok=True)
+            created = ensure_private_dir(self.canary, mode=0o700)
+            self.owned_dirs.extend(created)
+            self.canary_created = True
 
         if self.existing_hooks:
             if not self.existing_hooks.exists():
@@ -285,10 +303,8 @@ class Supervisor:
             if has_symlink_component(self.canary, dst):
                 raise ValueError("canary hooks.v1.json path contains a symlink")
 
-            devin_dir_created = not devin_dir.exists()
-            devin_dir.mkdir(parents=True, exist_ok=True)
-            if devin_dir_created:
-                os.chmod(devin_dir, 0o700)
+            created_devin = ensure_private_dir(devin_dir, mode=0o700, exist_ok=True)
+            self.owned_dirs.extend(created_devin)
             shutil.copyfile(self.existing_hooks, dst)
             os.chmod(dst, stat.S_IMODE(self.existing_hooks.stat().st_mode))
         else:
@@ -378,11 +394,10 @@ class Supervisor:
         """Execute the happy-path lifecycle and return the child's exit code."""
         # Create/chmod the runtime directory to 0700 before any file or
         # subdirectory is written, including the lifecycle log.
-        mkdir_private(self.runtime_dir, mode=0o700)
+        self.owned_dirs.extend(ensure_private_dir(self.runtime_dir, mode=0o700))
 
         self.events_dir = self.runtime_dir / "events"
-        self.events_dir.mkdir(parents=True, exist_ok=True)
-        os.chmod(self.events_dir, 0o700)
+        self.owned_dirs.extend(ensure_private_dir(self.events_dir, mode=0o700))
         self.summary_path = self.runtime_dir / "summary.json"
         self._write_pid(self.runtime_dir / "supervisor.pid")
 
@@ -393,8 +408,19 @@ class Supervisor:
         if self.canary is None:
             raise RuntimeError("canary was not created")
 
-        self.profile_id = make_profile_id()
-        self.profile_path = make_profile(self.canary, self.profile_id, self.model)
+        # Create the profile directory collision-safely: a pre-existing
+        # goal-devin-worker-* directory must not be treated as owned.
+        for _ in range(10):
+            self.profile_id = make_profile_id()
+            try:
+                profile_result = make_profile(self.canary, self.profile_id, self.model)
+                self.profile_path = profile_result[0]
+                self.owned_dirs.extend(profile_result[1])
+                break
+            except FileExistsError:
+                continue
+        else:
+            raise RuntimeError("Could not create a unique profile directory after 10 attempts")
 
         hook_command = self._install_hook_script()
         self._install_canary_hook(hook_command)
@@ -414,6 +440,7 @@ class Supervisor:
             events_dir=self.events_dir,
             summary_path=self.summary_path,
             lifecycle_log_path=self.lifecycle_path,
+            owned_dirs=self.owned_dirs,
         )
 
         self._copy_runtime_files()
@@ -425,14 +452,28 @@ class Supervisor:
             self._stop_sidecar()
             _lifecycle_log(self.lifecycle_path, "supervisor_end")
 
-        if self.profile_id:
-            remove_profile(self.canary, self.profile_id)
         self._restore_canary_hook()
+        if self.profile_id:
+            remove_profile(self.canary, self.profile_id, self.owned_dirs)
+
+        # Remove any run-created directories that are now empty, deepest first.
+        # Pre-existing directories are never in owned_dirs, so this cannot
+        # delete user/project .devin or .devin/agents directories.
+        for d in sorted(self.owned_dirs, key=lambda p: len(p.parts), reverse=True):
+            if d == self.canary or d == self.runtime_dir:
+                continue
+            try:
+                if d.is_dir() and not any(d.iterdir()):
+                    d.rmdir()
+            except OSError:
+                pass
 
         summary = self._read_summary()
         self._print_summary(summary)
 
-        if not self.keep_canary and self.canary is not None:
+        # Only remove a canary this run generated.  A caller-supplied canary is
+        # left untouched regardless of --keep-canary.
+        if self.canary_created and not self.keep_canary and self.canary is not None:
             shutil.rmtree(self.canary, ignore_errors=True)
 
         if self.devin_returncode is None:

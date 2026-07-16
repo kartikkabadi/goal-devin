@@ -10,6 +10,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import types
 from pathlib import Path
 
 import pytest
@@ -47,18 +48,28 @@ def _run_contract(
     tty: bool = False,
     process_overlap: bool = False,
     no_poll: bool = False,
+    stress: bool = False,
     keep: bool = False,
     extra_env: dict | None = None,
     contract_dir: Path | None = None,
     timeout: float | None = None,
+    devin_bin: Path | None = None,
+    sentinel: bool | str = False,
 ) -> tuple[int, list[str], Path]:
     """Run the shared contract and return (rc, error_lines, runtime_root)."""
     base_dir = Path(tempfile.mkdtemp(prefix="goal-devin-r1a1-test-"))
     runtime_root = base_dir / "runtime"
     runtime_root.mkdir(parents=True, exist_ok=True)
+    if sentinel:
+        sentinel_path = base_dir / "sentinel.txt"
+        sentinel_path.write_text(
+            sentinel if isinstance(sentinel, str) else "do not modify or delete",
+            encoding="utf-8",
+        )
     chosen_candidate = candidate or CANDIDATE
     chosen_canary = canary_fixture or CANARY_FIXTURE
     chosen_contract_dir = contract_dir or TESTKIT
+    chosen_devin_bin = devin_bin or FAKE_DEVIN
     existing_hooks_path: Path | None = None
     if isinstance(existing_hooks, (str, Path)) and existing_hooks:
         existing_hooks_path = Path(existing_hooks)
@@ -70,7 +81,7 @@ def _run_contract(
         "--candidate",
         str(chosen_candidate),
         "--devin-bin",
-        str(FAKE_DEVIN),
+        str(chosen_devin_bin),
         "--contract-dir",
         str(chosen_contract_dir),
         "--canary-fixture",
@@ -88,6 +99,8 @@ def _run_contract(
         cmd.append("--process-overlap")
     if no_poll:
         cmd.append("--no-poll")
+    if stress:
+        cmd.append("--stress")
     if keep:
         cmd.append("--keep-artifacts")
     if timeout is not None:
@@ -1022,3 +1035,310 @@ def test_production_source_tree_unchanged():
     )
     assert result.returncode == 0
     assert result.stdout.strip() == ""
+
+
+def test_limits_required_and_validated():
+    """A contract directory without limits.json or with a malformed one is rejected
+    before any runtime/project artifacts are created."""
+    bad_contract = Path(tempfile.mkdtemp(prefix="goal-devin-r1a1-bad-limits-"))
+    (bad_contract / "expected").mkdir(parents=True)
+    shutil.copyfile(
+        TESTKIT / "expected" / "event.schema.json", bad_contract / "expected" / "event.schema.json"
+    )
+    shutil.copyfile(
+        TESTKIT / "expected" / "summary.schema.json",
+        bad_contract / "expected" / "summary.schema.json",
+    )
+    shutil.copyfile(
+        TESTKIT / "expected" / "manifest.schema.json",
+        bad_contract / "expected" / "manifest.schema.json",
+    )
+    shutil.copyfile(
+        TESTKIT / "expected" / "limits.schema.json",
+        bad_contract / "expected" / "limits.schema.json",
+    )
+    try:
+        rc, errors, _ = _run_contract(contract_dir=bad_contract)
+        assert rc != 0
+        assert any("limits" in e.lower() for e in errors), errors
+    finally:
+        shutil.rmtree(bad_contract, ignore_errors=True)
+
+
+@pytest.mark.parametrize(
+    "limits_data, expected_substring",
+    [
+        ([], "JSON object"),
+        ({"max_tool_name_length": True}, "positive integer"),
+        ({"max_tool_name_length": "128"}, "positive integer"),
+        ({"max_tool_name_length": 128.5}, "positive integer"),
+        ({"max_tool_name_length": 0}, ">= 1"),
+        ({"max_tool_name_length": -5}, ">= 1"),
+        (
+            {
+                "max_tool_name_length": 128,
+                "max_profile_length": 128,
+                "max_event_value_length": 256,
+                "max_event_json_bytes": 100,
+                "max_total_spool_bytes": 1024,
+                "max_retained_event_files": 100,
+                "max_distinct_tools": 50,
+                "max_distinct_profiles": 50,
+                "max_recent_event_ids": 20,
+                "max_summary_size_bytes": 64,
+            },
+            "max_event_json_bytes",
+        ),
+    ],
+    ids=[
+        "non_object",
+        "boolean",
+        "string",
+        "float",
+        "zero",
+        "negative",
+        "cross_field_violation",
+    ],
+)
+def test_validate_limits_rejects_malformed_values(limits_data, expected_substring):
+    from native_launcher.limits import validate_limits
+
+    schema = json.loads((TESTKIT / "expected" / "limits.schema.json").read_text(encoding="utf-8"))
+    with pytest.raises(ValueError, match=expected_substring):
+        validate_limits(limits_data, schema)
+
+
+def test_validate_limits_rejects_unknown_fields():
+    from native_launcher.limits import validate_limits
+
+    schema = json.loads((TESTKIT / "expected" / "limits.schema.json").read_text(encoding="utf-8"))
+    data = json.loads((TESTKIT / "limits.json").read_text(encoding="utf-8"))
+    data["extra_field"] = 1
+    with pytest.raises(ValueError, match="additional property"):
+        validate_limits(data, schema)
+
+
+def test_stress_mode_enforces_all_bounds():
+    """The shared black-box stress run must stay within every configured limit."""
+    rc, errors, runtime_root = _run_contract(stress=True, keep=True, timeout=120)
+    assert rc == 0, "\n".join(errors)
+    try:
+        run_dir = _find_run_dir(runtime_root)
+        assert run_dir, f"No run directory found in {runtime_root}"
+        limits = json.loads((TESTKIT / "limits.json").read_text(encoding="utf-8"))
+        summary = json.loads((run_dir / "summary.json").read_text(encoding="utf-8"))
+        events_dir = run_dir / "events"
+
+        json_files = list(events_dir.glob("*.json"))
+        total_size = sum(p.stat().st_size for p in json_files)
+        assert len(json_files) <= limits["max_retained_event_files"]
+        assert total_size <= limits["max_total_spool_bytes"]
+        for p in json_files:
+            assert p.stat().st_size <= limits["max_event_json_bytes"]
+
+        assert summary["total_events"] > limits["max_retained_event_files"]
+        assert len(summary["tools"]) <= limits["max_distinct_tools"]
+        assert len(summary["profiles"]) <= limits["max_distinct_profiles"]
+        assert len(summary["consumed_event_ids"]) <= limits["max_recent_event_ids"]
+        assert (run_dir / "summary.json").stat().st_size <= limits["max_summary_size_bytes"]
+    finally:
+        shutil.rmtree(runtime_root.parent, ignore_errors=True)
+
+
+def test_sidecar_rejects_malformed_spool_files():
+    """Malformed event files must not crash the sidecar or be rescanned forever."""
+    from native_launcher.sidecar import Sidecar
+
+    runtime_dir = Path(tempfile.mkdtemp(prefix="goal-devin-sidecar-malformed-"))
+    events_dir = runtime_dir / "events"
+    events_dir.mkdir(parents=True)
+    shutil.copyfile(TESTKIT / "expected" / "event.schema.json", runtime_dir / "event.schema.json")
+    shutil.copyfile(TESTKIT / "limits.json", runtime_dir / "limits.json")
+
+    try:
+        limits = json.loads((TESTKIT / "limits.json").read_text(encoding="utf-8"))
+        valid_event = {
+            "schema_version": 1,
+            "event": "PostToolUse",
+            "tool_name": "run_subagent",
+            "profile": "goal-devin-worker-abc",
+            "is_background": False,
+            "success": True,
+            "observed_at": "2024-01-01T00:00:00+00:00",
+        }
+        (events_dir / "valid.json").write_text(json.dumps(valid_event), encoding="utf-8")
+
+        (events_dir / "bad-utf8.json").write_bytes(b"\xff\xfe\xff\xfe")
+        (events_dir / "not-object.json").write_text(json.dumps([]), encoding="utf-8")
+        (events_dir / "truncated.json").write_text('{"schema_version": 1', encoding="utf-8")
+        oversized = events_dir / "oversized.json"
+        oversized.write_bytes(b"x" * (limits["max_event_json_bytes"] + 1))
+        unreadable = events_dir / "unreadable.json"
+        unreadable.write_text(json.dumps(valid_event), encoding="utf-8")
+        os.chmod(unreadable, 0o000)
+
+        sidecar = Sidecar(runtime_dir)
+        sidecar.events_dir = events_dir
+        before_total = sidecar.total_events
+        sidecar._drain()
+        assert sidecar.total_events == before_total + 1
+        assert (events_dir / "valid.json").exists()
+        assert not (events_dir / "bad-utf8.json").exists()
+        assert not (events_dir / "not-object.json").exists()
+        assert not (events_dir / "truncated.json").exists()
+        assert not oversized.exists()
+        assert not unreadable.exists()
+
+        # A second drain must be a no-op; the malformed files are not rescanned.
+        second_total = sidecar.total_events
+        sidecar._drain()
+        assert sidecar.total_events == second_total
+    finally:
+        shutil.rmtree(runtime_dir, ignore_errors=True)
+
+
+def test_tty_timeout_reaps_descendants():
+    """A TTY candidate that hangs must be killed and the sidecar/child reaped."""
+    start = time.monotonic()
+    rc, errors, runtime_root = _run_contract(
+        tty=True,
+        timeout=2,
+        keep=True,
+        extra_env={"GOAL_DEVIN_FAKE_HANG": "1"},
+    )
+    elapsed = time.monotonic() - start
+    try:
+        assert rc != 0
+        assert elapsed < 8, f"runner did not enforce timeout ({elapsed:.1f}s)"
+        run_dir = _find_run_dir(runtime_root)
+        assert run_dir, f"No run directory found in {runtime_root}"
+        for name in ("supervisor.pid", "sidecar.pid", "child.pid"):
+            pid_path = run_dir / name
+            assert pid_path.exists(), f"{name} missing"
+            pid = int(pid_path.read_text(encoding="utf-8").strip().split()[0])
+            assert not _is_alive(pid), f"{name} {pid} is still alive after timeout"
+    finally:
+        shutil.rmtree(runtime_root.parent, ignore_errors=True)
+
+
+def _is_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except (OSError, ProcessLookupError):
+        return False
+    return True
+
+
+def test_modify_sentinel_rejected():
+    rc, errors, runtime_root = _run_contract(
+        candidate=TESTKIT / "fixtures" / "modify-sentinel-candidate.py",
+        sentinel=True,
+        keep=True,
+    )
+    try:
+        assert rc != 0
+        assert any("digest changed" in e.lower() or "changed" in e.lower() for e in errors), errors
+    finally:
+        shutil.rmtree(runtime_root.parent, ignore_errors=True)
+
+
+def test_delete_sentinel_rejected():
+    rc, errors, runtime_root = _run_contract(
+        candidate=TESTKIT / "fixtures" / "delete-sentinel-candidate.py",
+        sentinel=True,
+        keep=True,
+    )
+    try:
+        assert rc != 0
+        assert any("deleted" in e.lower() for e in errors), errors
+    finally:
+        shutil.rmtree(runtime_root.parent, ignore_errors=True)
+
+
+def test_empty_generated_ancestors_removed():
+    """Run-created .devin and .devin/agents directories must be removed if empty."""
+    rc, errors, runtime_root = _run_contract(keep=True)
+    assert rc == 0, "\n".join(errors)
+    try:
+        run_dir = _find_run_dir(runtime_root)
+        assert run_dir
+        manifest = json.loads((run_dir / "manifest.json").read_text())
+        canary = Path(manifest["canary"])
+        assert canary.exists()
+        # The fixture canary has no .devin directory; the candidate must not leave one.
+        assert not (canary / ".devin").exists(), "run-created .devin directory was not removed"
+    finally:
+        shutil.rmtree(runtime_root.parent, ignore_errors=True)
+
+
+def test_profile_directory_collision_avoids_overwrite(monkeypatch):
+    """A pre-existing goal-devin-worker-* directory must not be overwritten; the
+    supervisor must retry with a new profile_id."""
+    from native_launcher import supervisor as supervisor_module
+
+    runtime_root = Path(tempfile.mkdtemp(prefix="goal-devin-r1a1-collision-runtime-"))
+    canary = runtime_root / "canary"
+    canary.mkdir(parents=True)
+    (canary / "fib.py").write_text("# fixture\n", encoding="utf-8")
+    agents = canary / ".devin" / "agents"
+    agents.mkdir(parents=True)
+    existing_profile = agents / "goal-devin-worker-deadbeef"
+    existing_profile.mkdir()
+    sentinel = existing_profile / "AGENT.md"
+    sentinel.write_text("---\nname: existing\n---\n", encoding="utf-8")
+
+    existing_id = existing_profile.name
+    new_id = "goal-devin-worker-newface00"
+    profile_ids = iter([existing_id, new_id])
+
+    args = types.SimpleNamespace(
+        model="swe-1-7",
+        permission_mode="accept-edits",
+        devin_bin=str(FAKE_DEVIN),
+        contract_dir=str(TESTKIT),
+        runtime_root=str(runtime_root),
+        canary=str(canary),
+        existing_hooks=None,
+        keep_canary=False,
+    )
+
+    monkeypatch.setattr(supervisor_module, "make_profile_id", lambda: next(profile_ids))
+    monkeypatch.setattr(supervisor_module.Supervisor, "_start_sidecar", lambda self: None)
+    monkeypatch.setattr(
+        supervisor_module.Supervisor,
+        "_run_devin",
+        lambda self: setattr(self, "devin_returncode", 0),
+    )
+
+    try:
+        supervisor = supervisor_module.Supervisor(args)
+        rc = supervisor.run()
+        assert rc == 0
+        manifest = json.loads(supervisor.manifest_path.read_text())
+        assert manifest["profile_id"] == new_id
+        assert manifest["profile_id"] != existing_id
+        assert sentinel.read_text(encoding="utf-8") == "---\nname: existing\n---\n"
+        # The pre-existing directory is not claimed as owned.
+        owned_dirs = {Path(p).resolve() for p in manifest["owned_dirs"]}
+        assert existing_profile.resolve() not in owned_dirs
+    finally:
+        shutil.rmtree(runtime_root, ignore_errors=True)
+
+
+def test_manifest_records_owned_dirs():
+    """The manifest must record exact directories created by this run."""
+    rc, errors, runtime_root = _run_contract(keep=True)
+    assert rc == 0, "\n".join(errors)
+    try:
+        run_dir = _find_run_dir(runtime_root)
+        assert run_dir
+        manifest = json.loads((run_dir / "manifest.json").read_text())
+        assert "owned_dirs" in manifest
+        owned_dirs = {Path(p).resolve() for p in manifest["owned_dirs"]}
+        profile_path = Path(manifest["profile_path"]).resolve()
+        assert profile_path.parent in owned_dirs
+        # The .devin directory created by hook installation is owned by this run.
+        canary = Path(manifest["canary"]).resolve()
+        assert (canary / ".devin").resolve() in owned_dirs
+    finally:
+        shutil.rmtree(runtime_root.parent, ignore_errors=True)
