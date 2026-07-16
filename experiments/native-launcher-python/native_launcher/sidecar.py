@@ -58,7 +58,9 @@ class Sidecar:
         self.profiles: dict[str, int] = {}
         self.last_event: dict | None = None
         self.profile_id = self._load_profile_id()
-        self.canonical_event_ids: set[str] = set()
+        # Protect exactly one canonical evidence event: the newest
+        # PostToolUse/run_subagent/profile/success event observed.
+        self.canonical_event_id: str | None = None
         self.running = True
 
     def _load_profile_id(self) -> str | None:
@@ -243,8 +245,13 @@ class Sidecar:
                         del self.profiles[existing]
                         break
         self._add_profile(profile)
-        if tool == "run_subagent" and profile == self.profile_id:
-            self.canonical_event_ids.add(event_id)
+        if (
+            event.get("event") == "PostToolUse"
+            and event.get("success") is True
+            and tool == "run_subagent"
+            and profile == self.profile_id
+        ):
+            self.canonical_event_id = event_id
         self.last_event = {
             "tool_name": tool,
             "profile": profile,
@@ -284,8 +291,8 @@ class Sidecar:
         ):
             removed = False
             for i, (p, size, _) in enumerate(entries):
-                if p.stem in self.canonical_event_ids:
-                    # Never delete the canonical run_subagent observation for this run.
+                if p.stem == self.canonical_event_id:
+                    # Never delete the canonical PostToolUse/run_subagent observation.
                     continue
                 if p.stem in self.consumed and p.exists():
                     try:

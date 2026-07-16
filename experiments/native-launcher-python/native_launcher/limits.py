@@ -14,22 +14,28 @@ from typing import Any
 from .schema import validate
 
 
-# Absolute minimum size for a valid event JSON and summary JSON with a 32-hex
-# run_id after every trimmable field has been dropped.  These are used to reject
-# semantically impossible limit values (e.g. all sizes set to 1).
+# Semantic minimums derived from the canonical evidence the contract requires:
+# a PostToolUse/run_subagent event for the generated profile with an ISO timestamp.
+MIN_TOOL_NAME_LENGTH = len("run_subagent")
+MIN_PROFILE_LENGTH = len("goal-devin-worker-" + "0" * 16)
+_MIN_EVENT_VALUE = max(
+    MIN_TOOL_NAME_LENGTH, MIN_PROFILE_LENGTH, len("2026-07-15T00:00:00.000000+00:00")
+)
+MIN_EVENT_VALUE_LENGTH = _MIN_EVENT_VALUE
+
 _MIN_EVENT_JSON = json.dumps(
     {
         "schema_version": 1,
-        "event": "X",
-        "tool_name": "X",
-        "profile": "X",
+        "event": "PostToolUse",
+        "tool_name": "run_subagent",
+        "profile": "goal-devin-worker-" + "0" * 16,
         "is_background": False,
         "success": True,
-        "observed_at": "X",
+        "observed_at": "2026-07-15T00:00:00.000000+00:00",
     },
-    separators=(",", ":"),
+    indent=2,
 ).encode("utf-8")
-MIN_EVENT_JSON_BYTES = len(_MIN_EVENT_JSON)
+MIN_EVENT_JSON_BYTES = max(256, len(_MIN_EVENT_JSON))
 
 _MIN_SUMMARY_JSON = json.dumps(
     {
@@ -43,7 +49,7 @@ _MIN_SUMMARY_JSON = json.dumps(
     },
     separators=(",", ":"),
 ).encode("utf-8")
-MIN_SUMMARY_SIZE_BYTES = len(_MIN_SUMMARY_JSON)
+MIN_SUMMARY_SIZE_BYTES = max(256, len(_MIN_SUMMARY_JSON))
 
 
 @dataclass(frozen=True)
@@ -87,8 +93,8 @@ def _validate_limits_schema(schema: Any) -> None:
 
 
 def _cross_field_errors(data: dict[str, Any], label: str = "limits") -> list[str]:
-    """Enforce necessary relationships between limit values, including the
-    absolute minimum serialized sizes for a valid event and a trimmed summary."""
+    """Enforce per-field and cross-field semantic minimums so the canonical
+    PostToolUse/run_subagent event for the generated profile is representable."""
     errors: list[str] = []
     tool = data.get("max_tool_name_length")
     profile = data.get("max_profile_length")
@@ -98,6 +104,25 @@ def _cross_field_errors(data: dict[str, Any], label: str = "limits") -> list[str
     retained = data.get("max_retained_event_files")
     recent = data.get("max_recent_event_ids")
     summary = data.get("max_summary_size_bytes")
+
+    if isinstance(tool, int) and tool < MIN_TOOL_NAME_LENGTH:
+        errors.append(
+            f"{label}.max_tool_name_length ({tool}) must be >= {MIN_TOOL_NAME_LENGTH} to fit 'run_subagent'"
+        )
+    if isinstance(profile, int) and profile < MIN_PROFILE_LENGTH:
+        errors.append(
+            f"{label}.max_profile_length ({profile}) must be >= {MIN_PROFILE_LENGTH} to fit the generated profile id"
+        )
+    if isinstance(value, int) and value < MIN_EVENT_VALUE_LENGTH:
+        errors.append(
+            f"{label}.max_event_value_length ({value}) must be >= {MIN_EVENT_VALUE_LENGTH}"
+        )
+    if isinstance(value, int):
+        for other, name in ((tool, "max_tool_name_length"), (profile, "max_profile_length")):
+            if isinstance(other, int) and value < other:
+                errors.append(
+                    f"{label}.max_event_value_length ({value}) must be >= {name} ({other})"
+                )
 
     max_field = max((v for v in (tool, profile, value) if isinstance(v, int)), default=0)
     min_event = max(max_field, MIN_EVENT_JSON_BYTES)

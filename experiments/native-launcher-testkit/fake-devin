@@ -232,9 +232,13 @@ def _verify_existing_hooks_preserved(canary: Path) -> None:
         raise RuntimeError(f"Existing hook command was not preserved: {expected}")
 
 
-def _invoke_hook(command: list[str], profile_id: str) -> int:
-    payload = {
-        "hook_event_name": "PostToolUse",
+def _invoke_hook(
+    command: list[str],
+    profile_id: str,
+    event_name: str = "PostToolUse",
+) -> int:
+    payload: dict[str, Any] = {
+        "hook_event_name": event_name,
         "tool_name": "run_subagent",
         "tool_input": {
             "title": "<redacted>",
@@ -242,8 +246,11 @@ def _invoke_hook(command: list[str], profile_id: str) -> int:
             "profile": profile_id,
             "is_background": False,
         },
-        "tool_response": {"success": True, "output": "<redacted>"},
     }
+    if event_name == "PostToolUse":
+        payload["tool_response"] = {"success": True, "output": "<redacted>"}
+    else:
+        payload["tool_response"] = {}
     proc = subprocess.run(
         command,
         input=json.dumps(payload).encode("utf-8"),
@@ -251,6 +258,12 @@ def _invoke_hook(command: list[str], profile_id: str) -> int:
         stderr=subprocess.PIPE,
     )
     return proc.returncode
+
+
+def _canonical_flood(command: list[str], profile_id: str, count: int) -> None:
+    """Emit *count* canonical PostToolUse/run_subagent events through the hook."""
+    for _ in range(max(count, 0)):
+        _invoke_hook(command, profile_id, event_name="PostToolUse")
 
 
 def _read_limits(runtime_dir: Path) -> dict[str, int]:
@@ -478,14 +491,30 @@ def _main() -> int:
     stress = os.environ.get("GOAL_DEVIN_FAKE_STRESS") in ("1", "true", "yes")
     verbose = os.environ.get("GOAL_DEVIN_FAKE_VERBOSE") in ("1", "true", "yes")
     hang = os.environ.get("GOAL_DEVIN_FAKE_HANG") in ("1", "true", "yes")
+    session_start_forged = (
+        os.environ.get("GOAL_DEVIN_FAKE_SESSIONSTART_FORGED") in ("1", "true", "yes")
+    )
+    canonical_flood_raw = os.environ.get("GOAL_DEVIN_FAKE_CANONICAL_FLOOD", "")
+    canonical_flood = 0
+    if canonical_flood_raw:
+        try:
+            canonical_flood = int(canonical_flood_raw)
+        except ValueError:
+            canonical_flood = 0
 
     if verbose:
         _verbose_output()
 
-    if not no_poll and not stress:
+    if not no_poll and not stress and not canonical_flood and not session_start_forged:
         _barrier_wait(runtime_dir)
 
-    if stress:
+    if canonical_flood:
+        _canonical_flood(hook_command, profile_id, canonical_flood)
+    elif session_start_forged:
+        hook_rc = _invoke_hook(hook_command, profile_id, event_name="SessionStart")
+        if hook_rc != 0:
+            raise RuntimeError(f"Observation hook exited with code {hook_rc}")
+    elif stress:
         limits = _read_limits(runtime_dir) if runtime_dir else {}
         _stress_emit_events(runtime_dir or Path("/dev/null"), canary, profile_id, limits)
     else:

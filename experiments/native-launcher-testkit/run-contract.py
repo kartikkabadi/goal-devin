@@ -39,21 +39,29 @@ SECRET_PATTERNS = [
 
 MANAGED_BASE_MARKER = "GOAL_DEVIN_CONTRACT_BASE"
 
-# Minimum sizes for a valid compact event JSON and a minimal trimmed summary.
-# These reject semantically impossible limits (e.g. all sizes set to 1).
+# Semantic minimums for the canonical PostToolUse/run_subagent evidence event.
+# These reject semantically impossible limit values (e.g. all sizes set to 1).
+MIN_TOOL_NAME_LENGTH = len("run_subagent")
+MIN_PROFILE_LENGTH = len("goal-devin-worker-" + "0" * 16)
+MIN_EVENT_VALUE_LENGTH = max(
+    MIN_TOOL_NAME_LENGTH,
+    MIN_PROFILE_LENGTH,
+    len("2026-07-15T00:00:00.000000+00:00"),
+)
+
 _MIN_EVENT_JSON = json.dumps(
     {
         "schema_version": 1,
-        "event": "X",
-        "tool_name": "X",
-        "profile": "X",
+        "event": "PostToolUse",
+        "tool_name": "run_subagent",
+        "profile": "goal-devin-worker-" + "0" * 16,
         "is_background": False,
         "success": True,
-        "observed_at": "X",
+        "observed_at": "2026-07-15T00:00:00.000000+00:00",
     },
-    separators=(",", ":"),
+    indent=2,
 )
-MIN_EVENT_JSON_BYTES = len(_MIN_EVENT_JSON.encode("utf-8"))
+MIN_EVENT_JSON_BYTES = max(256, len(_MIN_EVENT_JSON.encode("utf-8")))
 
 _MIN_SUMMARY_JSON = json.dumps(
     {
@@ -67,7 +75,7 @@ _MIN_SUMMARY_JSON = json.dumps(
     },
     separators=(",", ":"),
 )
-MIN_SUMMARY_SIZE_BYTES = len(_MIN_SUMMARY_JSON.encode("utf-8"))
+MIN_SUMMARY_SIZE_BYTES = max(256, len(_MIN_SUMMARY_JSON.encode("utf-8")))
 
 _LIMITS_KEYS = {
     "max_tool_name_length",
@@ -322,6 +330,22 @@ def _load_contract_limits(contract_dir: Path) -> dict[str, int]:
     for key, value in limits.items():
         if isinstance(value, bool) or not isinstance(value, int) or value < 1:
             raise RuntimeError(f"limits.{key} must be a positive integer, got {value!r}")
+    if limits["max_tool_name_length"] < MIN_TOOL_NAME_LENGTH:
+        raise RuntimeError(
+            f"limits.max_tool_name_length ({limits['max_tool_name_length']}) must be >= {MIN_TOOL_NAME_LENGTH} to fit 'run_subagent'"
+        )
+    if limits["max_profile_length"] < MIN_PROFILE_LENGTH:
+        raise RuntimeError(
+            f"limits.max_profile_length ({limits['max_profile_length']}) must be >= {MIN_PROFILE_LENGTH} to fit the generated profile id"
+        )
+    if limits["max_event_value_length"] < MIN_EVENT_VALUE_LENGTH:
+        raise RuntimeError(
+            f"limits.max_event_value_length ({limits['max_event_value_length']}) must be >= {MIN_EVENT_VALUE_LENGTH}"
+        )
+    if limits["max_event_value_length"] < limits["max_tool_name_length"]:
+        raise RuntimeError("limits.max_event_value_length must be >= limits.max_tool_name_length")
+    if limits["max_event_value_length"] < limits["max_profile_length"]:
+        raise RuntimeError("limits.max_event_value_length must be >= limits.max_profile_length")
     max_field = max(
         limits["max_tool_name_length"],
         limits["max_profile_length"],
@@ -472,6 +496,20 @@ def _pid_is_in_tree(pid: int, root_pid: int) -> bool:
     except (OSError, ProcessLookupError, AttributeError):
         pass
     return _pid_is_descendant(pid, root_pid)
+
+
+def _union_pids(*lists: list[int] | None) -> list[int]:
+    """Merge PID lists, preserving order and removing duplicates/invalid values."""
+    seen: set[int] = set()
+    result: list[int] = []
+    for pids in lists:
+        if not pids:
+            continue
+        for pid in pids:
+            if pid > 0 and pid not in seen:
+                seen.add(pid)
+                result.append(pid)
+    return result
 
 
 def _kill_process_tree(
@@ -715,7 +753,10 @@ def _run_tty(
             returncode = proc.wait(timeout=max(0, deadline - time.monotonic()))
         except subprocess.TimeoutExpired:
             if run_dir_holder[0] is not None:
-                valid_pids = _discover_pids(proc.pid, run_dir_holder[0], time.monotonic() + 2)
+                # One final synchronous discovery immediately before killing, in
+                # case a detached sidecar wrote its PID after the finder snapshot.
+                discovered = _discover_pids(proc.pid, run_dir_holder[0], time.monotonic() + 0.5)
+                valid_pids = _union_pids(valid_pids, discovered)
             _kill_process_tree(proc, run_dir_holder[0], valid_pids)
             returncode = -1
     finally:
@@ -775,13 +816,18 @@ def _run_normal(
     except subprocess.TimeoutExpired:
         run_dir = run_dir_holder[0]
         valid_pids = pids_holder[0]
+        # Re-discover any PIDs that appeared after the finder snapshot, while the
+        # supervisor is still alive and can be used for ancestry verification.
+        if run_dir is not None:
+            discovered = _discover_pids(proc.pid, run_dir, time.monotonic() + 0.5)
+            valid_pids = _union_pids(valid_pids, discovered)
         _kill_process_tree(proc, run_dir, valid_pids)
         returncode = -1
         stdout, stderr = b"", b""
     finally:
         stop_event.set()
         if proc.poll() is None:
-            _kill_process_tree(proc, run_dir_holder[0], pids_holder[0])
+            _kill_process_tree(proc, run_dir_holder[0], valid_pids)
         finder_thread.join(timeout=1)
 
     run_dir = run_dir if run_dir is not None else find_run_dir(runtime_root, timeout=0.5)
@@ -1309,7 +1355,12 @@ def _check_event_provenance(
             )
             continue
         event_ids.add(p.stem)
-        if event.get("tool_name") == "run_subagent" and event.get("profile") == expected_profile:
+        if (
+            event.get("event") == "PostToolUse"
+            and event.get("success") is True
+            and event.get("tool_name") == "run_subagent"
+            and event.get("profile") == expected_profile
+        ):
             run_subagent_seen = True
 
     summary_path = run_dir / "summary.json"
@@ -1330,7 +1381,8 @@ def _check_event_provenance(
 
     if not run_subagent_seen:
         errors.append(
-            f"No retained event proves tool_name 'run_subagent' for profile {profile_id!r}"
+            f"No retained PostToolUse event with success=True proves tool_name 'run_subagent' "
+            f"for profile {profile_id!r}"
         )
 
     last = (summary or {}).get("last_event")
@@ -1429,6 +1481,64 @@ def _check_canary_integrity(
         errors.append("Run-created .devin/hooks.v1.json was not removed")
 
 
+def _safe_load_json(path: Path, label: str, errors: list[str]) -> Any | None:
+    """Load a JSON artifact, converting failures into contract errors."""
+    if not path.exists():
+        errors.append(f"{label} missing")
+        return None
+    try:
+        return load_json(path)
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        errors.append(f"{label} is not valid JSON: {exc}")
+    except OSError as exc:
+        errors.append(f"{label} cannot be read: {exc}")
+    return None
+
+
+def _safe_validate_schema(value: Any, schema_path: Path, label: str, errors: list[str]) -> None:
+    """Validate *value* against *schema_path*, collecting errors."""
+    try:
+        errors.extend(schema_validator.validate_file(value, schema_path))
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError) as exc:
+        errors.append(f"Could not validate {label} against schema: {exc}")
+
+
+def _preflight_contract_files(contract_dir: Path, errors: list[str]) -> bool:
+    """Verify that every authoritative contract file exists and is valid JSON
+    before launching the candidate, so missing/malformed schemas are reported as
+    contract errors rather than uncaught runner exceptions.
+    """
+    ok = True
+    schema_files = (
+        "event.schema.json",
+        "manifest.schema.json",
+        "summary.schema.json",
+        "limits.schema.json",
+    )
+    for name in schema_files:
+        path = contract_dir / "expected" / name
+        if not path.exists():
+            errors.append(f"Contract schema missing: {path}")
+            ok = False
+            continue
+        try:
+            load_json(path)
+        except (OSError, json.JSONDecodeError, UnicodeDecodeError) as exc:
+            errors.append(f"Contract schema invalid JSON: {path}: {exc}")
+            ok = False
+    limits_path = contract_dir / "limits.json"
+    if not limits_path.exists():
+        errors.append(f"Contract limits missing: {limits_path}")
+        ok = False
+    else:
+        try:
+            load_json(limits_path)
+        except (OSError, json.JSONDecodeError, UnicodeDecodeError) as exc:
+            errors.append(f"Contract limits invalid JSON: {limits_path}: {exc}")
+            ok = False
+    return ok
+
+
 def run_contract(args: argparse.Namespace) -> list[str]:
     errors: list[str] = []
 
@@ -1493,174 +1603,187 @@ def run_contract(args: argparse.Namespace) -> list[str]:
         preexisting_canary_hook_bytes = source.read_bytes()
         preexisting_canary_hook_mode = stat.S_IMODE(source.lstat().st_mode)
 
-    if not _process_identity_supported():
-        errors.append(
-            "Process identity verification is not supported on this platform; refusing to launch candidate"
-        )
-        _cleanup(
-            base_dir, runtime_root, args.keep_artifacts, base_dir_removable, runtime_root_removable
-        )
-        return errors
-
-    run_dir: Path | None = None
-    returncode = -1
-    stdout = b""
-    stderr = b""
-    try:
-        _proc, returncode, run_dir, stdout, stderr = run_candidate(args, runtime_root, canary)
-    except RuntimeError as exc:
-        errors.append(str(exc))
-    except Exception as exc:
-        errors.append(f"Runner exception: {exc}")
-
-    if returncode not in (0, -1):
-        errors.append(f"Candidate exited with code {returncode}")
-        if stderr:
-            text = stderr.decode("utf-8", errors="replace").replace("\n", " ").strip()
-            errors.append(f"stderr: ...{text[-500:]}")
-
-    _check_base_dir_integrity(base_dir, runtime_root, base_dir_snapshot, errors)
-
-    if run_dir is None:
-        run_dir = find_run_dir(runtime_root, timeout=0.5)
-    if run_dir is None:
-        errors.append("No run directory found under runtime root")
+    contract_dir = Path(args.contract_dir).resolve() if args.contract_dir else Path(__file__).parent
 
     manifest: dict[str, Any] | None = None
     summary: dict[str, Any] | None = None
     record: dict[str, Any] | None = None
-    limits: dict[str, int] | None = None
+    run_dir: Path | None = None
 
-    if run_dir is not None:
-        manifest_path = run_dir / "manifest.json"
-        summary_path = run_dir / "summary.json"
-        record_path = run_dir / "fake-devin.record.json"
-        events_dir = run_dir / "events"
-        if not manifest_path.exists():
-            errors.append("manifest.json missing")
-        else:
-            manifest = load_json(manifest_path)
-        if not summary_path.exists():
-            errors.append("summary.json missing")
-        else:
-            summary = load_json(summary_path)
-        if not record_path.exists():
-            errors.append("fake-devin.record.json missing")
-        else:
-            record = load_json(record_path)
-        if not events_dir.is_dir():
-            errors.append("events/ directory missing")
+    try:
+        if not _preflight_contract_files(contract_dir, errors):
+            return errors
 
-    contract_dir = Path(args.contract_dir).resolve() if args.contract_dir else Path(__file__).parent
+        if not _process_identity_supported():
+            errors.append(
+                "Process identity verification is not supported on this platform; refusing to launch candidate"
+            )
+            return errors
 
-    if run_dir is not None and manifest is not None and summary is not None and record is not None:
+        returncode = -1
+        stdout = b""
+        stderr = b""
         try:
-            limits = _load_contract_limits(contract_dir)
+            _proc, returncode, run_dir, stdout, stderr = run_candidate(args, runtime_root, canary)
         except RuntimeError as exc:
             errors.append(str(exc))
+        except Exception as exc:
+            errors.append(f"Runner exception: {exc}")
 
-    if (
-        run_dir is not None
-        and manifest is not None
-        and summary is not None
-        and record is not None
-        and limits is not None
-    ):
-        errors.extend(
-            schema_validator.validate_file(
-                manifest, contract_dir / "expected" / "manifest.schema.json"
+        if returncode not in (0, -1):
+            errors.append(f"Candidate exited with code {returncode}")
+            if stderr:
+                text = stderr.decode("utf-8", errors="replace").replace("\n", " ").strip()
+                errors.append(f"stderr: ...{text[-500:]}")
+
+        _check_base_dir_integrity(base_dir, runtime_root, base_dir_snapshot, errors)
+
+        if run_dir is None:
+            run_dir = find_run_dir(runtime_root, timeout=0.5)
+        if run_dir is None:
+            errors.append("No run directory found under runtime root")
+
+        limits: dict[str, int] | None = None
+        if run_dir is not None:
+            manifest = _safe_load_json(run_dir / "manifest.json", "manifest.json", errors)
+            summary = _safe_load_json(run_dir / "summary.json", "summary.json", errors)
+            record = _safe_load_json(
+                run_dir / "fake-devin.record.json", "fake-devin.record.json", errors
             )
-        )
-        errors.extend(
-            schema_validator.validate_file(
-                summary, contract_dir / "expected" / "summary.schema.json"
+            events_dir = run_dir / "events"
+            if not events_dir.is_dir():
+                errors.append("events/ directory missing")
+
+            if manifest is not None and summary is not None and record is not None:
+                try:
+                    limits = _load_contract_limits(contract_dir)
+                except RuntimeError as exc:
+                    errors.append(str(exc))
+
+        if (
+            run_dir is not None
+            and manifest is not None
+            and summary is not None
+            and record is not None
+            and limits is not None
+        ):
+            _safe_validate_schema(
+                manifest,
+                contract_dir / "expected" / "manifest.schema.json",
+                "manifest.json",
+                errors,
             )
-        )
+            _safe_validate_schema(
+                summary, contract_dir / "expected" / "summary.schema.json", "summary.json", errors
+            )
 
-        _check_file_modes(run_dir, errors)
-        _check_ownership(
-            run_dir,
-            canary,
-            manifest,
-            canary_fixture,
-            preexisting_canary_hook,
-            preexisting_canary_hook_bytes,
-            errors,
-        )
-        _check_event_provenance(run_dir, manifest, limits, contract_dir, errors)
-        _check_spool_bounds(run_dir, limits, errors)
+            _check_file_modes(run_dir, errors)
+            _check_ownership(
+                run_dir,
+                canary,
+                manifest,
+                canary_fixture,
+                preexisting_canary_hook,
+                preexisting_canary_hook_bytes,
+                errors,
+            )
+            _check_event_provenance(run_dir, manifest, limits, contract_dir, errors)
+            _check_spool_bounds(run_dir, limits, errors)
 
-        if manifest.get("model") != args.model:
-            errors.append(f"manifest model mismatch: {manifest.get('model')}")
-        if manifest.get("permission_mode") != args.permission_mode:
-            errors.append(f"manifest permission_mode mismatch: {manifest.get('permission_mode')}")
-        if manifest.get("devin_bin") != str(Path(args.devin_bin).resolve()):
-            errors.append("manifest devin_bin mismatch")
-
-        if record.get("model") != args.model:
-            errors.append(f"fake-devin saw model {record.get('model')}")
-        if record.get("permission_mode") != args.permission_mode:
-            errors.append(f"fake-devin saw permission_mode {record.get('permission_mode')}")
-        if record.get("cwd") != str(canary.resolve()):
-            errors.append(f"fake-devin cwd mismatch: {record.get('cwd')}")
-
-        expected_argv = ["--model", args.model, "--permission-mode", args.permission_mode]
-        if record.get("argv") != expected_argv:
-            errors.append(f"fake-devin argv is not exactly {expected_argv}: {record.get('argv')}")
-
-        profile_id = manifest.get("profile_id")
-        if not profile_id:
-            errors.append("manifest missing profile_id")
-        elif record.get("profile_id") != profile_id:
-            errors.append("fake-devin profile_id mismatch")
-
-        if args.tty:
-            tty = record.get("tty", {})
-            if not tty.get("stdin"):
-                errors.append("fake-devin did not observe a TTY stdin")
-            if not tty.get("stdout"):
-                errors.append("fake-devin did not observe a TTY stdout")
-            if not tty.get("stderr"):
-                errors.append("fake-devin did not observe a TTY stderr")
-
-        if args.stress:
-            if summary.get("total_events", 0) <= limits["max_retained_event_files"]:
+            if manifest.get("model") != args.model:
+                errors.append(f"manifest model mismatch: {manifest.get('model')}")
+            if manifest.get("permission_mode") != args.permission_mode:
                 errors.append(
-                    "stress mode did not consume more events than max_retained_event_files"
+                    f"manifest permission_mode mismatch: {manifest.get('permission_mode')}"
                 )
-        else:
-            expected_events = 1
-            actual_events = summary.get("total_events", 0)
-            if actual_events != expected_events:
+            if manifest.get("devin_bin") != str(Path(args.devin_bin).resolve()):
+                errors.append("manifest devin_bin mismatch")
+
+            if record.get("model") != args.model:
+                errors.append(f"fake-devin saw model {record.get('model')}")
+            if record.get("permission_mode") != args.permission_mode:
+                errors.append(f"fake-devin saw permission_mode {record.get('permission_mode')}")
+            if record.get("cwd") != str(canary.resolve()):
+                errors.append(f"fake-devin cwd mismatch: {record.get('cwd')}")
+
+            expected_argv = ["--model", args.model, "--permission-mode", args.permission_mode]
+            if record.get("argv") != expected_argv:
                 errors.append(
-                    f"deterministic mode expected exactly {expected_events} event, got {actual_events}"
+                    f"fake-devin argv is not exactly {expected_argv}: {record.get('argv')}"
                 )
 
-        _check_lifecycle(run_dir / "lifecycle.log", errors)
+            profile_id = manifest.get("profile_id")
+            if not profile_id:
+                errors.append("manifest missing profile_id")
+            elif record.get("profile_id") != profile_id:
+                errors.append("fake-devin profile_id mismatch")
 
-    # Canary integrity/cleanup is checked even on candidate or runtime errors so a
-    # failing run cannot bypass restoration checks by exiting early.
-    _check_canary_integrity(
-        canary,
-        canary_snapshot,
-        manifest or {},
-        preexisting_canary_hook,
-        preexisting_canary_hook_bytes,
-        preexisting_canary_hook_mode,
-        errors,
-    )
+            if args.tty:
+                tty = record.get("tty", {})
+                if not tty.get("stdin"):
+                    errors.append("fake-devin did not observe a TTY stdin")
+                if not tty.get("stdout"):
+                    errors.append("fake-devin did not observe a TTY stdout")
+                if not tty.get("stderr"):
+                    errors.append("fake-devin did not observe a TTY stderr")
 
-    secret_hits: list[str] = []
-    if run_dir is not None:
-        secret_hits.extend(secret_scan(run_dir, redact=runtime_root))
-    secret_hits.extend(secret_scan(canary, redact=runtime_root))
-    if secret_hits:
-        for hit in secret_hits[:10]:
-            errors.append(f"Secret-like pattern: {hit}")
+            if args.stress:
+                if summary.get("total_events", 0) <= limits["max_retained_event_files"]:
+                    errors.append(
+                        "stress mode did not consume more events than max_retained_event_files"
+                    )
+            else:
+                expected_events = 1
+                actual_events = summary.get("total_events", 0)
+                if actual_events != expected_events:
+                    errors.append(
+                        f"deterministic mode expected exactly {expected_events} event, got {actual_events}"
+                    )
 
-    _cleanup(
-        base_dir, runtime_root, args.keep_artifacts, base_dir_removable, runtime_root_removable
-    )
+            _check_lifecycle(run_dir / "lifecycle.log", errors)
+
+    except Exception as exc:
+        errors.append(f"Runner exception: {exc}")
+
+    finally:
+        # Canary integrity, secret scan, and cleanup are unconditional: a failing
+        # or malicious candidate must not bypass restoration checks by crashing the
+        # runner or exiting early.
+        try:
+            _check_canary_integrity(
+                canary,
+                canary_snapshot,
+                manifest or {},
+                preexisting_canary_hook,
+                preexisting_canary_hook_bytes,
+                preexisting_canary_hook_mode,
+                errors,
+            )
+        except Exception as exc:
+            errors.append(f"Canary integrity check failed: {exc}")
+
+        try:
+            if run_dir is not None:
+                secret_hits = secret_scan(run_dir, redact=runtime_root)
+            else:
+                secret_hits = []
+            secret_hits.extend(secret_scan(canary, redact=runtime_root))
+            if secret_hits:
+                for hit in secret_hits[:10]:
+                    errors.append(f"Secret-like pattern: {hit}")
+        except Exception as exc:
+            errors.append(f"Secret scan failed: {exc}")
+
+        try:
+            _cleanup(
+                base_dir,
+                runtime_root,
+                args.keep_artifacts,
+                base_dir_removable,
+                runtime_root_removable,
+            )
+        except Exception as exc:
+            errors.append(f"Cleanup failed: {exc}")
 
     return errors
 

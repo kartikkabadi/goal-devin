@@ -1242,15 +1242,15 @@ def test_summary_size_pressure_trims_bounded_fields():
 
     pressure_limits = {
         "max_tool_name_length": 20,
-        "max_profile_length": 30,
-        "max_event_value_length": 32,
-        "max_event_json_bytes": 250,
+        "max_profile_length": 34,
+        "max_event_value_length": 34,
+        "max_event_json_bytes": 256,
         "max_total_spool_bytes": 500,
         "max_retained_event_files": 10,
         "max_distinct_tools": 5,
         "max_distinct_profiles": 5,
         "max_recent_event_ids": 5,
-        "max_summary_size_bytes": 250,
+        "max_summary_size_bytes": 300,
     }
     (pressure_contract / "limits.json").write_text(json.dumps(pressure_limits), encoding="utf-8")
 
@@ -1768,3 +1768,195 @@ def test_partial_pid_rejected_and_sidecar_killed():
     assert elapsed < 8, f"runner did not fail within the timeout bound ({elapsed:.1f}s)"
     time.sleep(0.5)
     assert _no_process_with("partial-pid-candidate.py")
+
+
+def test_adversarial_limits_tiny_field_caps_rejected():
+    """A schema-valid limits file with large byte caps but tiny field caps must be
+    rejected before the candidate runs because the canonical event cannot be represented.
+    """
+    bad_contract = Path(tempfile.mkdtemp(prefix="goal-devin-r1a1-adversarial-limits-"))
+    (bad_contract / "expected").mkdir(parents=True)
+    for name in (
+        "event.schema.json",
+        "summary.schema.json",
+        "manifest.schema.json",
+        "limits.schema.json",
+    ):
+        shutil.copyfile(TESTKIT / "expected" / name, bad_contract / "expected" / name)
+    adversarial = {
+        "max_tool_name_length": 5,
+        "max_profile_length": 5,
+        "max_event_value_length": 5,
+        "max_event_json_bytes": 65536,
+        "max_total_spool_bytes": 65536,
+        "max_retained_event_files": 100,
+        "max_distinct_tools": 5,
+        "max_distinct_profiles": 5,
+        "max_recent_event_ids": 5,
+        "max_summary_size_bytes": 65536,
+    }
+    (bad_contract / "limits.json").write_text(json.dumps(adversarial), encoding="utf-8")
+    try:
+        rc, errors, _ = _run_contract(contract_dir=bad_contract)
+        assert rc != 0
+        assert any(
+            "max_tool_name_length" in e.lower()
+            or "max_profile_length" in e.lower()
+            or "max_event_value_length" in e.lower()
+            for e in errors
+        ), errors
+    finally:
+        shutil.rmtree(bad_contract, ignore_errors=True)
+
+
+def test_canonical_flood_respects_spool_bounds():
+    """Emit more canonical events than the retained-file limit and assert that
+    the sidecar keeps exactly the bounded number of files, the total spool size
+    stays within limits, and provenance (a PostToolUse/run_subagent event) is still
+    retained.
+    """
+    custom_contract = Path(tempfile.mkdtemp(prefix="goal-devin-r1a1-canonical-flood-"))
+    (custom_contract / "expected").mkdir(parents=True)
+    for name in (
+        "event.schema.json",
+        "summary.schema.json",
+        "manifest.schema.json",
+        "limits.schema.json",
+    ):
+        shutil.copyfile(TESTKIT / "expected" / name, custom_contract / "expected" / name)
+    flood_limits = {
+        "max_tool_name_length": 12,
+        "max_profile_length": 34,
+        "max_event_value_length": 34,
+        "max_event_json_bytes": 256,
+        "max_total_spool_bytes": 5000,
+        "max_retained_event_files": 5,
+        "max_distinct_tools": 5,
+        "max_distinct_profiles": 5,
+        "max_recent_event_ids": 5,
+        "max_summary_size_bytes": 300,
+    }
+    (custom_contract / "limits.json").write_text(json.dumps(flood_limits), encoding="utf-8")
+
+    try:
+        rc, errors, runtime_root = _run_contract(
+            contract_dir=custom_contract,
+            stress=True,
+            keep=True,
+            extra_env={"GOAL_DEVIN_FAKE_CANONICAL_FLOOD": "20"},
+        )
+        assert rc == 0, "\n".join(errors)
+        run_dir = _find_run_dir(runtime_root)
+        assert run_dir, f"No run directory found in {runtime_root}"
+        events_dir = run_dir / "events"
+        json_files = list(events_dir.glob("*.json"))
+        assert len(json_files) <= flood_limits["max_retained_event_files"]
+        total_size = sum(p.stat().st_size for p in json_files)
+        assert total_size <= flood_limits["max_total_spool_bytes"]
+
+        manifest = json.loads((run_dir / "manifest.json").read_text(encoding="utf-8"))
+        profile_id = manifest["profile_id"]
+        provenance_seen = False
+        for p in json_files:
+            event = json.loads(p.read_text(encoding="utf-8"))
+            if (
+                event.get("event") == "PostToolUse"
+                and event.get("tool_name") == "run_subagent"
+                and event.get("profile") == profile_id
+            ):
+                provenance_seen = True
+                break
+        assert provenance_seen, "No canonical PostToolUse/run_subagent event retained"
+
+        summary = json.loads((run_dir / "summary.json").read_text(encoding="utf-8"))
+        assert summary["total_events"] > flood_limits["max_retained_event_files"]
+    finally:
+        shutil.rmtree(runtime_root.parent, ignore_errors=True)
+
+
+def test_sessionstart_forged_fields_rejected():
+    """A SessionStart event with forged tool_name/profile must not satisfy canonical
+    event provenance.
+    """
+    rc, errors, _ = _run_contract(
+        extra_env={"GOAL_DEVIN_FAKE_SESSIONSTART_FORGED": "1"},
+    )
+    assert rc != 0
+    assert any(
+        "provenance" in e.lower()
+        or "posttooluse" in e.lower()
+        or ("run_subagent" in e.lower() and "success" in e.lower())
+        for e in errors
+    ), errors
+
+
+def test_malformed_manifest_rejected_and_cleanup_runs():
+    """A candidate that writes malformed manifest.json must be rejected without
+    crashing the runner, and cleanup/integrity checks must still run.
+    """
+    rc, errors, _ = _run_contract(
+        candidate=TESTKIT / "fixtures" / "malformed-manifest-candidate.py",
+    )
+    assert rc != 0
+    assert any("manifest.json" in e.lower() and "json" in e.lower() for e in errors), errors
+
+
+def test_malformed_summary_rejected_and_cleanup_runs():
+    rc, errors, _ = _run_contract(
+        candidate=TESTKIT / "fixtures" / "malformed-summary-candidate.py",
+    )
+    assert rc != 0
+    assert any("summary.json" in e.lower() and "json" in e.lower() for e in errors), errors
+
+
+def test_malformed_record_rejected_and_cleanup_runs():
+    rc, errors, _ = _run_contract(
+        candidate=TESTKIT / "fixtures" / "malformed-record-candidate.py",
+    )
+    assert rc != 0
+    assert any("fake-devin.record.json" in e.lower() and "json" in e.lower() for e in errors), (
+        errors
+    )
+
+
+def test_missing_schema_rejected_before_runtime():
+    """A contract directory missing an authoritative schema must be rejected before
+    the candidate is launched.
+    """
+    bad_contract = Path(tempfile.mkdtemp(prefix="goal-devin-r1a1-missing-schema-"))
+    (bad_contract / "expected").mkdir(parents=True)
+    for name in ("event.schema.json", "manifest.schema.json", "limits.schema.json"):
+        shutil.copyfile(TESTKIT / "expected" / name, bad_contract / "expected" / name)
+    shutil.copyfile(TESTKIT / "limits.json", bad_contract / "limits.json")
+    try:
+        rc, errors, _ = _run_contract(contract_dir=bad_contract)
+        assert rc != 0
+        assert any("summary.schema.json" in e.lower() or "missing" in e.lower() for e in errors), (
+            errors
+        )
+    finally:
+        shutil.rmtree(bad_contract, ignore_errors=True)
+
+
+def test_delayed_sidecar_pid_reaped_on_timeout():
+    """A candidate that writes sidecar.pid after the first discovery window must still
+    have the sidecar discovered and killed on timeout.
+    """
+    start = time.monotonic()
+    rc, errors, runtime_root = _run_contract(
+        candidate=TESTKIT / "fixtures" / "delayed-sidecar-pid-candidate.py",
+        timeout=5,
+        keep=True,
+    )
+    elapsed = time.monotonic() - start
+    try:
+        assert rc != 0
+        assert elapsed < 12, f"runner did not enforce timeout ({elapsed:.1f}s)"
+        run_dir = _find_run_dir(runtime_root)
+        assert run_dir, f"No run directory found in {runtime_root}"
+        sidecar_pid_path = run_dir / "sidecar.pid"
+        assert sidecar_pid_path.exists(), "sidecar.pid missing"
+        sidecar_pid = int(sidecar_pid_path.read_text(encoding="utf-8").strip().split()[0])
+        assert not _is_alive(sidecar_pid), f"sidecar {sidecar_pid} is still alive after timeout"
+    finally:
+        shutil.rmtree(runtime_root.parent, ignore_errors=True)

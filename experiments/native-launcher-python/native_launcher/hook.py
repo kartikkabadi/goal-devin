@@ -17,6 +17,15 @@ from typing import Any
 
 MAX_STDIN_BYTES = 1024 * 1024
 
+# Semantic minimums for the canonical PostToolUse/run_subagent evidence event.
+MIN_TOOL_NAME_LENGTH = len("run_subagent")
+MIN_PROFILE_LENGTH = len("goal-devin-worker-" + "0" * 16)
+MIN_EVENT_VALUE_LENGTH = max(
+    MIN_TOOL_NAME_LENGTH,
+    MIN_PROFILE_LENGTH,
+    len("2026-07-15T00:00:00.000000+00:00"),
+)
+
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -51,8 +60,19 @@ def _coerce_limits(data: Any) -> Limits:
         ):
             if not isinstance(v, int) or isinstance(v, bool) or v < 1:
                 raise ValueError(f"{name} must be a positive integer")
-        if event < max(tool, profile, value):
-            raise ValueError("max_event_json_bytes must be >= largest field limit")
+        if tool < MIN_TOOL_NAME_LENGTH:
+            raise ValueError(f"max_tool_name_length must be >= {MIN_TOOL_NAME_LENGTH}")
+        if profile < MIN_PROFILE_LENGTH:
+            raise ValueError(f"max_profile_length must be >= {MIN_PROFILE_LENGTH}")
+        if value < MIN_EVENT_VALUE_LENGTH:
+            raise ValueError(f"max_event_value_length must be >= {MIN_EVENT_VALUE_LENGTH}")
+        if value < max(tool, profile):
+            raise ValueError(
+                "max_event_value_length must be >= max(max_tool_name_length, max_profile_length)"
+            )
+        min_event_json = max(value, 256)
+        if event < min_event_json:
+            raise ValueError(f"max_event_json_bytes must be >= {min_event_json}")
         return Limits(tool, profile, value, event)
     except (ValueError, TypeError):
         return _default_limits()
