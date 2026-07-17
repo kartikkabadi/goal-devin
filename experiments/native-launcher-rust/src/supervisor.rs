@@ -14,9 +14,11 @@ use serde_json::{Map, Value};
 use std::fs;
 use std::io::{self, Write};
 use std::os::unix::fs::PermissionsExt;
-use std::os::unix::process::CommandExt;
+use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -53,6 +55,10 @@ pub struct Supervisor {
     devin_proc: Option<Child>,
     devin_returncode: Option<i32>,
     started_at: Option<DateTime<Utc>>,
+
+    sigint_received: Arc<AtomicBool>,
+    sigterm_received: Arc<AtomicBool>,
+    signal_ids: Vec<signal_hook::SigId>,
 
     owned_dirs: Vec<PathBuf>,
     owned_paths: Vec<PathBuf>,
@@ -187,6 +193,9 @@ impl Supervisor {
             devin_proc: None,
             devin_returncode: None,
             started_at: None,
+            sigint_received: Arc::new(AtomicBool::new(false)),
+            sigterm_received: Arc::new(AtomicBool::new(false)),
+            signal_ids: Vec::new(),
             owned_dirs: Vec::new(),
             owned_paths: Vec::new(),
             cleaned: false,
@@ -207,6 +216,8 @@ impl Supervisor {
     }
 
     fn run_lifecycle(&mut self) -> Result<i32> {
+        self.register_signals();
+
         self.create_runtime_dirs()?;
         self.update_companion_state(RunState::PreparingRuntime, "setup");
         self.copy_runtime_files()?;
@@ -222,6 +233,12 @@ impl Supervisor {
         self.write_manifest()?;
         self.update_companion_state(RunState::StartingSidecar, "sidecar");
         self.start_sidecar()?;
+
+        if self.signal_received() {
+            // Abort before launching Devin; final cleanup will still run.
+            return self.interrupt_return();
+        }
+
         self.update_companion_state(RunState::LaunchingDevin, "launch");
         self.print_companion_command();
         self.run_devin()?;
@@ -229,6 +246,32 @@ impl Supervisor {
         self.stop_sidecar();
         self.log_lifecycle("supervisor_end");
         Ok(self.devin_returncode.unwrap_or(1))
+    }
+
+    fn register_signals(&mut self) {
+        let sigint = Arc::clone(&self.sigint_received);
+        if let Ok(id) = signal_hook::flag::register(signal_hook::consts::SIGINT, sigint) {
+            self.signal_ids.push(id);
+        }
+        let sigterm = Arc::clone(&self.sigterm_received);
+        if let Ok(id) = signal_hook::flag::register(signal_hook::consts::SIGTERM, sigterm) {
+            self.signal_ids.push(id);
+        }
+    }
+
+    fn signal_received(&self) -> bool {
+        self.sigint_received.load(Ordering::Relaxed)
+            || self.sigterm_received.load(Ordering::Relaxed)
+    }
+
+    fn interrupt_return(&mut self) -> Result<i32> {
+        let code = if self.sigint_received.load(Ordering::Relaxed) {
+            130
+        } else {
+            143
+        };
+        self.devin_returncode = Some(code);
+        Ok(code)
     }
 
     fn create_runtime_dirs(&mut self) -> Result<()> {
@@ -520,6 +563,9 @@ impl Supervisor {
         let ready_path = self.runtime_dir.join("sidecar-ready");
         let deadline = Instant::now() + Duration::from_secs(5);
         while Instant::now() < deadline {
+            if self.signal_received() {
+                return Err(anyhow!("interrupted while waiting for sidecar"));
+            }
             if ready_path.exists() {
                 return Ok(());
             }
@@ -547,14 +593,60 @@ impl Supervisor {
             .envs(self.env());
 
         let child = cmd.spawn()?;
+        let pid = child.id() as i32;
         self.devin_proc = Some(child);
-        let status = self
-            .devin_proc
-            .as_mut()
-            .unwrap()
-            .wait()
-            .context("waiting for devin process")?;
-        self.devin_returncode = status.code();
+
+        // Mark the active session immediately and refresh Goal Devin-owned
+        // state periodically without touching Devin's terminal streams.
+        self.update_companion_state(RunState::DevinActive, "Devin");
+
+        let mut child = self.devin_proc.take().unwrap();
+        let refresh_interval = Duration::from_millis(self.companion_poll_ms.max(50));
+        let mut signal_sent: Option<i32> = None;
+        let signal_deadline = Duration::from_secs(10);
+        let signal_start = Instant::now();
+
+        loop {
+            thread::sleep(refresh_interval);
+
+            if let Some(status) = child.try_wait().context("try_wait on devin process")? {
+                if let Some(code) = status.code() {
+                    self.devin_returncode = Some(code);
+                } else if let Some(sig) = ExitStatusExt::signal(&status) {
+                    // Conventional 128+signal exit status.
+                    self.devin_returncode = Some(128 + (sig & 0x7f));
+                }
+                break;
+            }
+
+            // Refresh observable state while the session is live.
+            self.update_companion_state(RunState::DevinActive, "Devin");
+
+            if signal_sent.is_none() {
+                if self.sigint_received.load(Ordering::Relaxed) {
+                    signal_sent = Some(libc::SIGINT);
+                    unsafe {
+                        let _ = libc::kill(pid, libc::SIGINT);
+                    }
+                } else if self.sigterm_received.load(Ordering::Relaxed) {
+                    signal_sent = Some(libc::SIGTERM);
+                    unsafe {
+                        let _ = libc::kill(pid, libc::SIGTERM);
+                    }
+                }
+            } else if signal_start.elapsed() > signal_deadline {
+                // Devin did not exit after the forwarded signal; force terminate.
+                unsafe {
+                    let _ = libc::kill(pid, libc::SIGKILL);
+                }
+                let _ = child.wait();
+                self.devin_returncode = signal_sent.map(|s| 128 + (s & 0x7f));
+                break;
+            }
+        }
+
+        self.devin_proc = Some(child);
+
         if self.devin_returncode.is_some() {
             Ok(())
         } else {

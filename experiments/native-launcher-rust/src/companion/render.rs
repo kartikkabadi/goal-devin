@@ -1,9 +1,9 @@
 use super::model::{CompanionState, RunState};
 use super::style::Theme;
-use ratatui::layout::{Constraint, Direction, Layout, Margin, Rect};
-use ratatui::style::Style;
+use ratatui::layout::{Constraint, Direction, Layout, Rect};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span, Text};
-use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph};
+use ratatui::widgets::Paragraph;
 use ratatui::Frame;
 
 pub struct RenderContext<'a> {
@@ -26,50 +26,18 @@ pub fn render(frame: &mut Frame, ctx: &RenderContext) {
         return;
     }
 
-    let main = Block::default()
-        .title("Goal Devin")
-        .borders(Borders::ALL)
-        .border_style(ctx.theme.border_style(true))
-        .border_set(ctx.theme.border_set());
-
-    let inner = area.inner(Margin {
-        horizontal: 1,
-        vertical: 1,
-    });
-    frame.render_widget(main, area);
-
-    let sections = Layout::default()
+    let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(1), // header
-            Constraint::Length(5), // session
-            Constraint::Length(5), // worker
-            Constraint::Length(4), // observation
-            Constraint::Length(7), // lifecycle
-            Constraint::Min(4),    // warnings / help
+            Constraint::Min(0),    // body
+            Constraint::Length(1), // footer
         ])
-        .split(inner);
+        .split(area);
 
-    render_header(frame, ctx, sections[0]);
-    render_session(frame, ctx, sections[1]);
-    render_worker(frame, ctx, sections[2]);
-    render_observation(frame, ctx, sections[3]);
-    render_lifecycle(frame, ctx, sections[4]);
-
-    if ctx.show_help {
-        let block = Block::default()
-            .title("Help")
-            .borders(Borders::ALL)
-            .border_style(ctx.theme.border_style(true))
-            .border_set(ctx.theme.border_set());
-        let help = Paragraph::new(help_text(ctx.theme))
-            .block(block)
-            .style(ctx.theme.primary());
-        frame.render_widget(Clear, sections[5]);
-        frame.render_widget(help, sections[5]);
-    } else {
-        render_warnings(frame, ctx, sections[5]);
-    }
+    render_header(frame, ctx, chunks[0]);
+    render_body(frame, ctx, chunks[1]);
+    render_footer(frame, ctx, chunks[2]);
 }
 
 fn render_header(frame: &mut Frame, ctx: &RenderContext, area: Rect) {
@@ -85,79 +53,82 @@ fn render_header(frame: &mut Frame, ctx: &RenderContext, area: Rect) {
     frame.render_widget(Paragraph::new(line), area);
 }
 
-fn render_session(frame: &mut Frame, ctx: &RenderContext, area: Rect) {
-    let block = section_block(ctx.theme, "Session");
-    let lines = vec![
-        key_value(ctx.theme, "State", ctx.state.run_state.label()),
-        key_value(ctx.theme, "Elapsed", ctx.state.elapsed_since_start()),
-        key_value(ctx.theme, "Model", ctx.state.model.as_str()),
-        key_value(ctx.theme, "Permission", ctx.state.permission_mode.as_str()),
-    ];
-    let text = Text::from(lines);
-    frame.render_widget(
-        Paragraph::new(text).block(block).style(ctx.theme.primary()),
-        area,
-    );
+fn render_body(frame: &mut Frame, ctx: &RenderContext, area: Rect) {
+    let sections = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(4), // session
+            Constraint::Length(3), // observation
+            Constraint::Length(8), // lifecycle
+            Constraint::Min(1),    // warnings / help
+        ])
+        .split(area);
+
+    render_session(frame, ctx, sections[0]);
+    render_observation(frame, ctx, sections[1]);
+    render_lifecycle(frame, ctx, sections[2]);
+
+    if ctx.show_help {
+        render_help(frame, ctx, sections[3]);
+    } else {
+        render_warnings(frame, ctx, sections[3]);
+    }
 }
 
-fn render_worker(frame: &mut Frame, ctx: &RenderContext, area: Rect) {
-    let block = section_block(ctx.theme, "Worker");
+fn render_session(frame: &mut Frame, ctx: &RenderContext, area: Rect) {
     let policy = if ctx.state.profile_id.is_empty() {
         "—"
     } else {
         "read-only"
     };
-    let lines = vec![
-        key_value(ctx.theme, "Profile", ctx.state.short_profile_id()),
-        key_value(ctx.theme, "Policy", policy),
-        key_value(ctx.theme, "Configured model", ctx.state.model.as_str()),
-    ];
-    frame.render_widget(
-        Paragraph::new(Text::from(lines))
-            .block(block)
-            .style(ctx.theme.primary()),
-        area,
-    );
+    let text = Text::from(vec![
+        section_title(ctx.theme, "Session"),
+        Line::from(vec![
+            key(ctx.theme, "Model: "),
+            value(ctx.theme, ctx.state.model.as_str()),
+            Span::raw("   "),
+            key(ctx.theme, "Permission: "),
+            value(ctx.theme, ctx.state.permission_mode.as_str()),
+        ]),
+        Line::from(vec![
+            key(ctx.theme, "Profile: "),
+            value(ctx.theme, ctx.state.short_profile_id()),
+            Span::raw("   "),
+            key(ctx.theme, "Policy: "),
+            value(ctx.theme, policy),
+        ]),
+    ]);
+    frame.render_widget(Paragraph::new(text).style(ctx.theme.primary()), area);
 }
 
 fn render_observation(frame: &mut Frame, ctx: &RenderContext, area: Rect) {
-    let block = section_block(ctx.theme, "Observation");
     let health = if ctx.state.sidecar_healthy {
         ("healthy", ctx.theme.success())
     } else {
         ("waiting", ctx.theme.warning())
     };
-    let lines = vec![
+    let latest = if ctx.state.last_event_type.is_empty() {
+        "—".to_string()
+    } else {
+        sanitize(&ctx.state.last_event_type)
+    };
+    let text = Text::from(vec![
+        section_title(ctx.theme, "Observation"),
         Line::from(vec![
-            Span::styled("Sidecar: ", ctx.theme.label()),
+            key(ctx.theme, "Sidecar: "),
             Span::styled(health.0, health.1),
-        ]),
-        Line::from(vec![
-            Span::styled("Events: ", ctx.theme.label()),
+            Span::raw("   "),
+            key(ctx.theme, "Events: "),
             Span::styled(ctx.state.event_count.to_string(), ctx.theme.accent()),
+            Span::raw("   "),
+            key(ctx.theme, "Latest: "),
+            value(ctx.theme, latest.as_str()),
         ]),
-        Line::from(vec![
-            Span::styled("Latest: ", ctx.theme.label()),
-            Span::styled(
-                if ctx.state.last_event_type.is_empty() {
-                    "—"
-                } else {
-                    &ctx.state.last_event_type
-                },
-                ctx.theme.secondary(),
-            ),
-        ]),
-    ];
-    frame.render_widget(
-        Paragraph::new(Text::from(lines))
-            .block(block)
-            .style(ctx.theme.primary()),
-        area,
-    );
+    ]);
+    frame.render_widget(Paragraph::new(text).style(ctx.theme.primary()), area);
 }
 
 fn render_lifecycle(frame: &mut Frame, ctx: &RenderContext, area: Rect) {
-    let block = section_block(ctx.theme, "Lifecycle");
     let phases = [
         ("setup", RunState::PreparingRuntime),
         ("hook", RunState::InstallingHook),
@@ -169,35 +140,35 @@ fn render_lifecycle(frame: &mut Frame, ctx: &RenderContext, area: Rect) {
     ];
 
     let current = ctx.state.lifecycle_phase.as_str();
-    let mut lines: Vec<Line> = Vec::new();
-    for (label, _marker) in phases {
-        let active = label == current || matches_active(label, &ctx.state.run_state);
+    let mut lines: Vec<Line> = vec![section_title(ctx.theme, "Lifecycle")];
+    let mut phase_spans: Vec<Span> = Vec::new();
+    for (i, (label, _marker)) in phases.iter().enumerate() {
+        let active = *label == current || matches_active(label, &ctx.state.run_state);
         let style = if active {
             ctx.theme.heading()
         } else {
             ctx.theme.dim()
         };
-        let prefix = if active { "▸ " } else { "  " };
-        lines.push(Line::from(Span::styled(
-            format!("{}{}", prefix, label),
-            style,
-        )));
+        phase_spans.push(Span::styled(sanitize(label), style));
+        if i < phases.len() - 1 {
+            phase_spans.push(Span::styled("  ›  ", ctx.theme.dim()));
+        }
     }
-
+    lines.push(Line::from(phase_spans));
     frame.render_widget(
-        Paragraph::new(Text::from(lines))
-            .block(block)
-            .style(ctx.theme.primary()),
+        Paragraph::new(Text::from(lines)).style(ctx.theme.primary()),
         area,
     );
 }
 
 fn render_warnings(frame: &mut Frame, ctx: &RenderContext, area: Rect) {
-    let block = section_block(ctx.theme, "Warnings");
+    let title = section_title(ctx.theme, "Warnings");
     if ctx.state.warnings.is_empty() {
-        let text = Text::from(Line::from(Span::styled("None", ctx.theme.dim())));
         frame.render_widget(
-            Paragraph::new(text).block(block).style(ctx.theme.primary()),
+            Paragraph::new(Text::from(vec![
+                title,
+                Line::from(Span::styled("None", ctx.theme.dim())),
+            ])),
             area,
         );
         return;
@@ -206,59 +177,89 @@ fn render_warnings(frame: &mut Frame, ctx: &RenderContext, area: Rect) {
     let start = ctx
         .warning_scroll
         .min(ctx.state.warnings.len().saturating_sub(1));
-    let visible = (area.height as usize).saturating_sub(2).max(1);
+    let visible = area.height.saturating_sub(1).max(1) as usize;
     let end = (start + visible).min(ctx.state.warnings.len());
-    let items: Vec<ListItem> = ctx.state.warnings[start..end]
-        .iter()
-        .map(|w| ListItem::new(Line::from(Span::styled(sanitize(w), ctx.theme.warning()))))
-        .collect();
-    let list = List::new(items).block(block).style(ctx.theme.primary());
-    frame.render_widget(list, area);
+    let mut lines = vec![title];
+    lines.extend(
+        ctx.state.warnings[start..end]
+            .iter()
+            .map(|w| Line::from(Span::styled(sanitize(w), ctx.theme.warning()))),
+    );
+    frame.render_widget(
+        Paragraph::new(Text::from(lines)).style(ctx.theme.primary()),
+        area,
+    );
 }
 
-fn help_text(theme: &Theme) -> Text {
-    let lines = vec![
+fn render_help(frame: &mut Frame, ctx: &RenderContext, area: Rect) {
+    let text = Text::from(vec![
+        section_title(ctx.theme, "Help"),
         Line::from(vec![
-            Span::styled("q", theme.label()),
-            Span::raw("  close/hide companion"),
+            key(ctx.theme, "q / Esc "),
+            Span::raw("close/hide companion"),
+        ]),
+        Line::from(vec![key(ctx.theme, "? "), Span::raw("toggle this help")]),
+        Line::from(vec![
+            key(ctx.theme, "j / ↓ "),
+            Span::raw("scroll warnings down"),
         ]),
         Line::from(vec![
-            Span::styled("?", theme.label()),
-            Span::raw("  toggle this help"),
+            key(ctx.theme, "k / ↑ "),
+            Span::raw("scroll warnings up"),
         ]),
-        Line::from(vec![
-            Span::styled("j / ↓", theme.label()),
-            Span::raw(" scroll warnings down"),
-        ]),
-        Line::from(vec![
-            Span::styled("k / ↑", theme.label()),
-            Span::raw(" scroll warnings up"),
-        ]),
-        Line::from(vec![
-            Span::styled("Ctrl+c", theme.label()),
-            Span::raw(" exit"),
-        ]),
-    ];
-    Text::from(lines)
+        Line::from(vec![key(ctx.theme, "Ctrl+c "), Span::raw("exit")]),
+    ]);
+    frame.render_widget(Paragraph::new(text).style(ctx.theme.primary()), area);
 }
 
-fn section_block<'a>(theme: &'a Theme, title: &'a str) -> Block<'a> {
-    Block::default()
-        .title(title)
-        .borders(Borders::ALL)
-        .border_style(theme.border_style(false))
-        .border_set(theme.border_set())
+fn render_footer(frame: &mut Frame, ctx: &RenderContext, area: Rect) {
+    let left = ctx.state.run_state.label();
+    let color = ctx.theme.state_color(&ctx.state.run_state);
+    let sidecar = if ctx.state.sidecar_healthy {
+        "up"
+    } else {
+        "down"
+    };
+
+    let right = format!(
+        "{}  |  {}  |  events {}  |  sidecar {}",
+        sanitize(ctx.state.model.as_str()),
+        sanitize(ctx.state.permission_mode.as_str()),
+        ctx.state.event_count,
+        sidecar,
+    );
+
+    let chunks = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(40), Constraint::Percentage(60)])
+        .split(area);
+
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            left,
+            Style::default().fg(color).add_modifier(Modifier::BOLD),
+        ))),
+        chunks[0],
+    );
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(right, ctx.theme.dim()))),
+        chunks[1],
+    );
 }
 
-fn key_value<'a>(
-    theme: &'a Theme,
-    key: &'a str,
-    value: impl Into<std::borrow::Cow<'a, str>> + std::convert::AsRef<str>,
-) -> Line<'a> {
+fn section_title<'a>(theme: &'a Theme, title: &'a str) -> Line<'a> {
     Line::from(vec![
-        Span::styled(format!("{}: ", key), theme.label()),
-        Span::styled(sanitize(value), theme.secondary()),
+        Span::styled(sanitize(title), theme.heading()),
+        Span::raw(" "),
     ])
+}
+
+fn key<'a>(theme: &'a Theme, label: &'a str) -> Span<'a> {
+    Span::styled(label, theme.label())
+}
+
+fn value<'a>(theme: &'a Theme, text: impl AsRef<str> + 'a) -> Span<'a> {
+    Span::styled(sanitize(text), theme.secondary())
 }
 
 fn matches_active(label: &str, run_state: &RunState) -> bool {

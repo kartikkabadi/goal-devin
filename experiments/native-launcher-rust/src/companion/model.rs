@@ -4,6 +4,14 @@ use serde::{Deserialize, Serialize};
 const MAX_WARNINGS: usize = 10;
 const MAX_WARNING_LEN: usize = 200;
 
+fn sanitize_string(s: &mut String, max_len: usize) {
+    *s = s
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .take(max_len)
+        .collect();
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RunState {
     #[default]
@@ -81,16 +89,15 @@ impl CompanionState {
     }
 
     pub fn sanitize(&mut self) {
-        self.model.truncate(64);
-        self.permission_mode.truncate(32);
-        self.profile_id.truncate(64);
-        self.last_event_type.truncate(64);
-        self.lifecycle_phase.truncate(64);
+        sanitize_string(&mut self.model, 64);
+        sanitize_string(&mut self.permission_mode, 32);
+        sanitize_string(&mut self.profile_id, 64);
+        sanitize_string(&mut self.last_event_type, 64);
+        sanitize_string(&mut self.lifecycle_phase, 64);
         self.warnings.retain(|w| !w.is_empty());
         self.warnings.truncate(MAX_WARNINGS);
         for w in &mut self.warnings {
-            w.retain(|c| !c.is_control());
-            w.truncate(MAX_WARNING_LEN);
+            sanitize_string(w, MAX_WARNING_LEN);
         }
     }
 

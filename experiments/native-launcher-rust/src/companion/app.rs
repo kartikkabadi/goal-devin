@@ -10,8 +10,9 @@ use crossterm::terminal::{
 use crossterm::{cursor, QueueableCommand};
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
-use std::io::{self, stdout, Write};
+use std::io::{self, stdout, Stdout, Write};
 use std::path::Path;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 pub struct App {
@@ -42,13 +43,12 @@ impl App {
     }
 
     pub fn run(&mut self) -> Result<i32> {
-        setup_terminal()?;
+        let _panic_guard = PanicHookGuard::install();
+        let _guard = TerminalGuard::setup()?;
         let mut terminal = Terminal::new(CrosstermBackend::new(io::stdout()))
             .context("failed to create terminal")?;
 
         let result = self.event_loop(&mut terminal);
-
-        restore_terminal()?;
 
         match result {
             Ok(code) => Ok(code),
@@ -142,22 +142,135 @@ impl App {
     }
 }
 
-fn setup_terminal() -> Result<()> {
-    enable_raw_mode()?;
-    let mut stdout = stdout();
-    stdout
-        .queue(EnterAlternateScreen)?
-        .queue(cursor::Hide)?
-        .flush()?;
-    Ok(())
+struct TerminalGuard {
+    raw_mode: bool,
+    alternate_screen: bool,
+    cursor_hidden: bool,
 }
 
-fn restore_terminal() -> Result<()> {
-    disable_raw_mode()?;
-    let mut stdout = stdout();
-    stdout
-        .queue(LeaveAlternateScreen)?
-        .queue(cursor::Show)?
-        .flush()?;
-    Ok(())
+impl TerminalGuard {
+    fn setup() -> Result<Self> {
+        enable_raw_mode()?;
+        let mut guard = Self {
+            raw_mode: true,
+            alternate_screen: false,
+            cursor_hidden: false,
+        };
+        let mut stdout = stdout();
+
+        if let Err(e) = stdout.queue(EnterAlternateScreen) {
+            drop(guard);
+            return Err(e.into());
+        }
+        guard.alternate_screen = true;
+
+        if let Err(e) = stdout.queue(cursor::Hide) {
+            drop(guard);
+            return Err(e.into());
+        }
+        guard.cursor_hidden = true;
+
+        if let Err(e) = stdout.flush() {
+            drop(guard);
+            return Err(e.into());
+        }
+
+        Ok(guard)
+    }
+
+    fn restore(&mut self) {
+        let mut stdout = StdoutWrapper(stdout());
+        if self.cursor_hidden {
+            let _ = stdout.queue(cursor::Show);
+        }
+        if self.alternate_screen {
+            let _ = stdout.queue(LeaveAlternateScreen);
+        }
+        if self.raw_mode {
+            let _ = disable_raw_mode();
+        }
+        let _ = stdout.flush();
+    }
+}
+
+impl Drop for TerminalGuard {
+    fn drop(&mut self) {
+        self.restore();
+    }
+}
+
+/// Newtype so we can call `QueueableCommand` methods on `Stdout` without
+/// importing the trait at call sites.
+struct StdoutWrapper(Stdout);
+
+impl std::ops::DerefMut for StdoutWrapper {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+
+impl std::ops::Deref for StdoutWrapper {
+    type Target = Stdout;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+type PanicHook = Box<dyn Fn(&std::panic::PanicHookInfo<'_>) + Sync + Send + 'static>;
+
+struct PanicHookGuard {
+    prev: Arc<Mutex<Option<PanicHook>>>,
+}
+
+impl PanicHookGuard {
+    fn install() -> Self {
+        let prev = Arc::new(Mutex::new(Some(std::panic::take_hook())));
+        let prev2 = Arc::clone(&prev);
+        std::panic::set_hook(Box::new(move |info| {
+            // Best-effort terminal restoration even if the panic happened
+            // inside the rendering or event loop.
+            let _ = disable_raw_mode();
+            let mut stdout = stdout();
+            let _ = stdout.queue(cursor::Show);
+            let _ = stdout.queue(LeaveAlternateScreen);
+            let _ = stdout.flush();
+            if let Some(ref hook) = *prev2.lock().unwrap() {
+                hook(info);
+            }
+        }));
+        Self { prev }
+    }
+}
+
+impl Drop for PanicHookGuard {
+    fn drop(&mut self) {
+        if let Some(prev) = self.prev.lock().unwrap().take() {
+            std::panic::set_hook(prev);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn terminal_guard_setup_and_drop_is_safe() {
+        // In a TTY this enters/exits raw + alternate screen via Drop;
+        // in a non-TTY setup returns Err and nothing is left enabled.
+        let guard = TerminalGuard::setup();
+        drop(guard);
+    }
+
+    #[test]
+    fn panic_hook_guard_installs_and_restores() {
+        let original = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        {
+            let _guard = PanicHookGuard::install();
+        }
+        let restored = std::panic::take_hook();
+        drop(restored);
+        std::panic::set_hook(original);
+    }
 }

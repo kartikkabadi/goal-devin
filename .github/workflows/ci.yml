@@ -154,3 +154,76 @@ jobs:
             --runtime-root "$base/runtime" \
             --base-dir "$base" \
             --keep-artifacts
+
+      - name: Shared contract (TTY)
+        run: |
+          set -e
+          base="$RUNNER_TEMP/contract-tty"
+          rm -rf "$base" && mkdir -p "$base"
+          python3 experiments/native-launcher-testkit/run-contract.py \
+            --candidate experiments/native-launcher-rust/target/release/goal-devin-dev \
+            --devin-bin experiments/native-launcher-testkit/fake-devin \
+            --model swe-1-7 \
+            --permission-mode accept-edits \
+            --contract-dir experiments/native-launcher-testkit \
+            --canary-fixture experiments/native-launcher-testkit/fixtures/canary \
+            --runtime-root "$base/runtime" \
+            --base-dir "$base" \
+            --tty \
+            --keep-artifacts
+
+      - name: Shared contract (process overlap)
+        run: |
+          set -e
+          base="$RUNNER_TEMP/contract-overlap"
+          rm -rf "$base" && mkdir -p "$base"
+          python3 experiments/native-launcher-testkit/run-contract.py \
+            --candidate experiments/native-launcher-rust/target/release/goal-devin-dev \
+            --devin-bin experiments/native-launcher-testkit/fake-devin \
+            --model swe-1-7 \
+            --permission-mode accept-edits \
+            --contract-dir experiments/native-launcher-testkit \
+            --canary-fixture experiments/native-launcher-testkit/fixtures/canary \
+            --runtime-root "$base/runtime" \
+            --base-dir "$base" \
+            --process-overlap \
+            --keep-artifacts
+
+      - name: Shared contract (no-poll)
+        run: |
+          set -e
+          base="$RUNNER_TEMP/contract-nopoll"
+          rm -rf "$base" && mkdir -p "$base"
+          python3 experiments/native-launcher-testkit/run-contract.py \
+            --candidate experiments/native-launcher-rust/target/release/goal-devin-dev \
+            --devin-bin experiments/native-launcher-testkit/fake-devin \
+            --model swe-1-7 \
+            --permission-mode accept-edits \
+            --contract-dir experiments/native-launcher-testkit \
+            --canary-fixture experiments/native-launcher-testkit/fixtures/canary \
+            --runtime-root "$base/runtime" \
+            --base-dir "$base" \
+            --no-poll \
+            --keep-artifacts
+
+      - name: Shared contract (stress)
+        run: |
+          set -e
+          base="$RUNNER_TEMP/contract-stress"
+          rm -rf "$base" && mkdir -p "$base"
+          python3 experiments/native-launcher-testkit/run-contract.py \
+            --candidate experiments/native-launcher-rust/target/release/goal-devin-dev \
+            --devin-bin experiments/native-launcher-testkit/fake-devin \
+            --model swe-1-7 \
+            --permission-mode accept-edits \
+            --contract-dir experiments/native-launcher-testkit \
+            --canary-fixture experiments/native-launcher-testkit/fixtures/canary \
+            --runtime-root "$base/runtime" \
+            --base-dir "$base" \
+            --stress \
+            --timeout 60 \
+            --keep-artifacts
+
+      - name: Rust negative/lifecycle tests
+        working-directory: experiments/native-launcher-rust
+        run: cargo test --all-targets --all-features -- barrier sigint lifecycle

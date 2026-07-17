@@ -7,10 +7,11 @@ use std::path::{Path, PathBuf};
 
 const MAX_STDIN_BYTES: usize = 1024 * 1024;
 
-fn sanitize_string(s: &str, max_len: usize) -> String {
-    let mut out = s.chars().take(max_len).collect::<String>();
-    out.retain(|c| c != '\n' && c != '\r');
-    out
+pub(crate) fn sanitize_string(s: &str, max_len: usize) -> String {
+    s.chars()
+        .take(max_len)
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect()
 }
 
 fn event_within_limits(event: &Value, limits: &Limits) -> bool {
@@ -207,5 +208,21 @@ mod tests {
         let tool = event.get("tool_name").unwrap().as_str().unwrap();
         assert!(tool.len() <= limits.max_tool_name_length);
         assert!(!tool.contains('\n'));
+    }
+
+    #[test]
+    fn extract_event_sanitizes_adversarial_terminal_controls() {
+        // ANSI clear-screen and xterm title sequences embedded in tool_name.
+        let adversarial = "\u{001b}[2J\u{001b}]0;owned\u{0007}\nsubagent";
+        let payload = json!({
+            "hook_event_name": "PostToolUse",
+            "tool_name": adversarial,
+        });
+        let limits = Limits::default();
+        let event = extract_event(&payload, &limits).unwrap();
+        let tool = event.get("tool_name").unwrap().as_str().unwrap();
+        assert!(!tool.contains('\u{001b}'));
+        assert!(!tool.contains('\n'));
+        assert!(!tool.contains('\u{0007}'));
     }
 }

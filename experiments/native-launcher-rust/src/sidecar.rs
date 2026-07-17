@@ -1,3 +1,4 @@
+use crate::hook::sanitize_string;
 use crate::limits::{load_limits, Limits};
 use crate::schema::{load_schema, validate};
 use crate::utils::{atomic_write, lifecycle_log, utcnow_iso};
@@ -284,15 +285,22 @@ impl Sidecar {
         self.consumed_order.push(event_id.clone());
         self.total_events += 1;
 
-        let tool = event.get("tool_name").and_then(|v| v.as_str());
-        let profile = event.get("profile").and_then(|v| v.as_str());
-        self._add_tool(tool);
-        self._add_profile(profile, tool);
+        let tool = event
+            .get("tool_name")
+            .and_then(|v| v.as_str())
+            .map(|s| sanitize_string(s, self.limits.max_tool_name_length));
+        let profile = event
+            .get("profile")
+            .and_then(|v| v.as_str())
+            .map(|s| sanitize_string(s, self.limits.max_profile_length));
+
+        self._add_tool(tool.as_deref());
+        self._add_profile(profile.as_deref(), tool.as_deref());
 
         if event.get("event").and_then(|v| v.as_str()) == Some("PostToolUse")
             && event.get("success").and_then(|v| v.as_bool()) == Some(true)
-            && tool == Some("run_subagent")
-            && profile == self.profile_id.as_deref()
+            && tool.as_deref() == Some("run_subagent")
+            && profile.as_deref() == self.profile_id.as_deref()
         {
             self.canonical_event_id = Some(event_id.clone());
         }
@@ -300,14 +308,11 @@ impl Sidecar {
         let mut last = Map::new();
         last.insert(
             "tool_name".to_string(),
-            tool.map(|s| Value::String(s.to_string()))
-                .unwrap_or(Value::Null),
+            tool.map(Value::String).unwrap_or(Value::Null),
         );
         last.insert(
             "profile".to_string(),
-            profile
-                .map(|s| Value::String(s.to_string()))
-                .unwrap_or(Value::Null),
+            profile.map(Value::String).unwrap_or(Value::Null),
         );
         last.insert(
             "is_background".to_string(),
@@ -321,8 +326,10 @@ impl Sidecar {
             "observed_at".to_string(),
             event
                 .get("observed_at")
-                .cloned()
-                .unwrap_or(Value::String(utcnow_iso())),
+                .and_then(|v| v.as_str())
+                .map(|s| sanitize_string(s, self.limits.max_event_value_length))
+                .map(Value::String)
+                .unwrap_or_else(|| Value::String(utcnow_iso())),
         );
         self.last_event = Some(Value::Object(last));
 
